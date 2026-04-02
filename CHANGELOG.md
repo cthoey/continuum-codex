@@ -14,6 +14,7 @@ the `0.x` phase while the install shape and operator workflow continue to evolve
 - removed the standalone branding document and folded the minimal naming note into the main docs
 - added a `continuum doctor` command to validate local Continuum, Codex, runner, and project setup
 - expanded `continuum` into a CLI wrapper for init, enable, start, stop, restart, and status
+- added launchctl and systemd user-service support through `continuum service ...`
 
 ## [0.1.0] - 2026-04-02
 

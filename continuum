@@ -6,13 +6,17 @@ import base64
 import json
 import os
 import re
+import signal
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 PASS = "PASS"
 WARN = "WARN"
@@ -21,6 +25,8 @@ FAIL = "FAIL"
 HOME_CONFIG_DEFAULT = "~/.config/continuum/config.toml"
 CODEX_HOME_DEFAULT = "~/.codex"
 DEFAULT_HOME_RUNNER = "~/continuum-runner"
+DEFAULT_SERVICE_TIMEOUT_SECONDS = 2 * 60 * 60
+SERVICE_LABEL_PREFIX = "dev.continuum.codex"
 MANAGED_MARKERS = [
     ("<!-- continuum:begin -->", "<!-- continuum:end -->"),
     ("<!-- codex-autonomous-kit:begin -->", "<!-- codex-autonomous-kit:end -->"),
@@ -370,6 +376,273 @@ def require_runner_script(runner_root: Path, name: str) -> Path:
     return script_path
 
 
+def run_capture(cmd: list[str]) -> tuple[int, str]:
+    completed = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return completed.returncode, completed.stdout
+
+
+def load_projects_payload(config_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    payload = load_json(config_path)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"projects.json must contain an object at top level: {config_path}")
+
+    projects = payload.get("projects", [])
+    if not isinstance(projects, list):
+        raise SystemExit(f"'projects' must be a list in {config_path}")
+
+    normalized: list[dict[str, Any]] = [item for item in projects if isinstance(item, dict)]
+    return payload, normalized
+
+
+def find_project_entry(config_path: Path, project_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload, projects = load_projects_payload(config_path)
+    for item in projects:
+        if str(item.get("name")) == project_name:
+            return payload, item
+    raise SystemExit(f"Project not found in {config_path}: {project_name}")
+
+
+def ensure_runner_scripts_current(runner_root: Path) -> None:
+    sync_runner_scripts(runner_root, force=False)
+
+
+def detect_service_manager() -> str:
+    if sys.platform == "darwin":
+        if shutil.which("launchctl") is None:
+            raise SystemExit("launchctl is not available on this macOS host.")
+        return "launchctl"
+    if sys.platform.startswith("linux"):
+        if shutil.which("systemctl") is None:
+            raise SystemExit("systemctl is not available on this Linux host.")
+        return "systemd"
+    raise SystemExit("Continuum service mode currently supports macOS launchctl and Linux systemd --user.")
+
+
+def default_service_dir(manager: str) -> Path:
+    if manager == "launchctl":
+        return Path("~/Library/LaunchAgents").expanduser()
+    if manager == "systemd":
+        return Path("~/.config/systemd/user").expanduser()
+    raise SystemExit(f"Unsupported service manager: {manager}")
+
+
+def service_timeout_seconds() -> int:
+    raw = os.environ.get("CONTINUUM_SERVICE_STOP_TIMEOUT_SECONDS", "")
+    if raw.isdigit():
+        return int(raw)
+    return DEFAULT_SERVICE_TIMEOUT_SECONDS
+
+
+def build_service_metadata(
+    runner_root: Path,
+    config_path: Path,
+    project_name: str,
+    service_dir_arg: str | None,
+    require_service_runner: bool = True,
+) -> dict[str, Any]:
+    _payload, project = find_project_entry(config_path, project_name)
+    manager = detect_service_manager()
+    slug = slugify_project_name(project_name)
+    runner_root = runner_root.expanduser().resolve()
+    config_path = config_path.expanduser().resolve()
+    python_path = Path(sys.executable).resolve()
+    service_runner = runner_root / "service_runner.py"
+    if require_service_runner:
+        service_runner = require_runner_script(runner_root, "service_runner.py")
+    service_dir = Path(service_dir_arg).expanduser().resolve() if service_dir_arg else default_service_dir(manager)
+    timeout = service_timeout_seconds()
+
+    if manager == "launchctl":
+        name = f"{SERVICE_LABEL_PREFIX}.{slug}"
+        install_path = service_dir / f"{name}.plist"
+        service_target = f"gui/{os.getuid()}/{name}"
+    else:
+        name = f"continuum-{slug}.service"
+        install_path = service_dir / name
+        service_target = name
+
+    return {
+        "manager": manager,
+        "project_name": project_name,
+        "project_path": str(project.get("path", "")),
+        "slug": slug,
+        "label": name,
+        "service_target": service_target,
+        "service_dir": service_dir,
+        "install_path": install_path,
+        "python_path": python_path,
+        "runner_root": runner_root,
+        "config_path": config_path,
+        "service_runner": service_runner,
+        "log_path": runner_root / f"service.{slug}.log",
+        "supervisor_pidfile": runner_root / f"supervisor.{slug}.pid",
+        "timeout_seconds": timeout,
+    }
+
+
+def render_launchd_plist(meta: dict[str, Any]) -> str:
+    program_args = [
+        str(meta["python_path"]),
+        str(meta["service_runner"]),
+        str(meta["config_path"]),
+        str(meta["project_name"]),
+    ]
+    args_xml = "\n".join(f"      <string>{xml_escape(arg)}</string>" for arg in program_args)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>{xml_escape(str(meta["label"]))}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{xml_escape(str(meta["runner_root"]))}</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ExitTimeOut</key>
+    <integer>{int(meta["timeout_seconds"])}</integer>
+    <key>StandardOutPath</key>
+    <string>{xml_escape(str(meta["log_path"]))}</string>
+    <key>StandardErrorPath</key>
+    <string>{xml_escape(str(meta["log_path"]))}</string>
+  </dict>
+</plist>
+"""
+
+
+def render_systemd_unit(meta: dict[str, Any]) -> str:
+    exec_start = shlex.join(
+        [
+            str(meta["python_path"]),
+            str(meta["service_runner"]),
+            str(meta["config_path"]),
+            str(meta["project_name"]),
+        ]
+    )
+    return f"""[Unit]
+Description=Continuum for Codex ({meta["project_name"]})
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory={meta["runner_root"]}
+ExecStart={exec_start}
+KillSignal=SIGTERM
+TimeoutStopSec={int(meta["timeout_seconds"])}
+Restart=no
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def ensure_launchd_loaded(meta: dict[str, Any]) -> None:
+    rc, _output = run_capture(["launchctl", "print", meta["service_target"]])
+    if rc == 0:
+        return
+    rc, output = run_capture(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(meta["install_path"])])
+    if rc != 0:
+        raise SystemExit(output.strip() or f"Failed to bootstrap {meta['install_path']}")
+
+
+def parse_launchctl_pid(output: str) -> int | None:
+    match = re.search(r"\bpid = (\d+)\b", output)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def collect_service_status(meta: dict[str, Any]) -> dict[str, Any]:
+    installed = Path(meta["install_path"]).exists()
+    result: dict[str, Any] = {
+        "project_name": meta["project_name"],
+        "manager": meta["manager"],
+        "install_path": str(meta["install_path"]),
+        "service_target": str(meta["service_target"]),
+        "installed": installed,
+        "loaded": False,
+        "active": False,
+        "service_pid": None,
+        "supervisor_pid": read_pid(Path(meta["supervisor_pidfile"])),
+        "supervisor_running": False,
+    }
+
+    if meta["manager"] == "launchctl":
+        rc, output = run_capture(["launchctl", "print", meta["service_target"]])
+        result["loaded"] = rc == 0
+        result["raw_status"] = output.strip()
+        result["service_pid"] = parse_launchctl_pid(output) if rc == 0 else None
+        result["active"] = pid_is_alive(result["service_pid"]) if isinstance(result["service_pid"], int) else False
+    else:
+        cmd = [
+            "systemctl",
+            "--user",
+            "show",
+            str(meta["service_target"]),
+            "--property",
+            "LoadState",
+            "--property",
+            "ActiveState",
+            "--property",
+            "SubState",
+            "--property",
+            "MainPID",
+            "--property",
+            "UnitFileState",
+        ]
+        rc, output = run_capture(cmd)
+        fields: dict[str, str] = {}
+        if rc == 0:
+            for line in output.splitlines():
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                fields[key] = value
+        result["fields"] = fields
+        result["loaded"] = fields.get("LoadState") == "loaded"
+        result["active"] = fields.get("ActiveState") == "active"
+        main_pid = fields.get("MainPID")
+        if main_pid and main_pid.isdigit() and int(main_pid) > 0:
+            result["service_pid"] = int(main_pid)
+        result["raw_status"] = output.strip()
+
+    supervisor_pid = result.get("supervisor_pid")
+    result["supervisor_running"] = pid_is_alive(supervisor_pid if isinstance(supervisor_pid, int) else None)
+    return result
+
+
+def wait_for_pid_exit(pid: int | None, timeout_seconds: int) -> bool:
+    if pid is None:
+        return True
+    deadline = datetime.now(timezone.utc).timestamp() + max(timeout_seconds, 0)
+    while pid_is_alive(pid):
+        if datetime.now(timezone.utc).timestamp() >= deadline:
+            return False
+        time.sleep(2)
+    return True
+
+
 def sync_runner_scripts(runner_root: Path, force: bool) -> tuple[list[str], list[str]]:
     source_root = Path(__file__).resolve().parent / "supervisor"
     copied: list[str] = []
@@ -487,6 +760,207 @@ def run_restart(args: argparse.Namespace) -> int:
     config_path = resolve_projects_config_path(args.config, runner_root)
     script = require_runner_script(runner_root, "restart_project.sh")
     return invoke_subprocess([str(script), args.project_name, str(config_path)])
+
+
+def run_service_install(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    ensure_runner_scripts_current(runner_root)
+    config_path = require_existing_path(resolve_projects_config_path(args.config, runner_root), "Config file")
+    meta = build_service_metadata(runner_root, config_path, args.project_name, args.service_dir)
+    meta["service_dir"].mkdir(parents=True, exist_ok=True)
+
+    if meta["manager"] == "launchctl":
+        content = render_launchd_plist(meta)
+    else:
+        content = render_systemd_unit(meta)
+    Path(meta["install_path"]).write_text(content, encoding="utf-8")
+
+    if args.no_manager:
+        print(f"Wrote service definition: {meta['install_path']}")
+        return 0
+
+    if meta["manager"] == "launchctl":
+        run_capture(["launchctl", "bootout", f"gui/{os.getuid()}", str(meta["install_path"])])
+        ensure_launchd_loaded(meta)
+    else:
+        rc, output = run_capture(["systemctl", "--user", "daemon-reload"])
+        if rc != 0:
+            raise SystemExit(output.strip() or "systemctl --user daemon-reload failed")
+
+    print(f"Installed service definition for {args.project_name}: {meta['install_path']}")
+    return 0
+
+
+def run_service_uninstall(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = require_existing_path(resolve_projects_config_path(args.config, runner_root), "Config file")
+    meta = build_service_metadata(runner_root, config_path, args.project_name, args.service_dir, require_service_runner=False)
+
+    if not args.no_manager:
+        if meta["manager"] == "launchctl":
+            run_capture(["launchctl", "bootout", f"gui/{os.getuid()}", str(meta["install_path"])])
+            Path(meta["install_path"]).unlink(missing_ok=True)
+        else:
+            run_capture(["systemctl", "--user", "disable", "--now", str(meta["service_target"])])
+            Path(meta["install_path"]).unlink(missing_ok=True)
+            rc, output = run_capture(["systemctl", "--user", "daemon-reload"])
+            if rc != 0:
+                raise SystemExit(output.strip() or "systemctl --user daemon-reload failed")
+    else:
+        Path(meta["install_path"]).unlink(missing_ok=True)
+    print(f"Removed service definition for {args.project_name}: {meta['install_path']}")
+    return 0
+
+
+def run_service_start(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    ensure_runner_scripts_current(runner_root)
+    config_path = require_existing_path(resolve_projects_config_path(args.config, runner_root), "Config file")
+    meta = build_service_metadata(runner_root, config_path, args.project_name, args.service_dir)
+
+    if not Path(meta["install_path"]).exists():
+        install_args = argparse.Namespace(
+            project_name=args.project_name,
+            runner_root=args.runner_root,
+            home_config=args.home_config,
+            config=str(config_path),
+            service_dir=args.service_dir,
+            no_manager=False,
+        )
+        run_service_install(install_args)
+
+    if meta["manager"] == "launchctl":
+        ensure_launchd_loaded(meta)
+        rc, output = run_capture(["launchctl", "kickstart", "-p", str(meta["service_target"])])
+        if rc != 0:
+            raise SystemExit(output.strip() or f"Failed to start service {meta['service_target']}")
+    else:
+        rc, output = run_capture(["systemctl", "--user", "start", str(meta["service_target"])])
+        if rc != 0:
+            raise SystemExit(output.strip() or f"Failed to start service {meta['service_target']}")
+
+    print(f"Started service for {args.project_name}")
+    return 0
+
+
+def run_service_stop(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = require_existing_path(resolve_projects_config_path(args.config, runner_root), "Config file")
+    meta = build_service_metadata(runner_root, config_path, args.project_name, args.service_dir)
+
+    if meta["manager"] == "launchctl":
+        rc, output = run_capture(["launchctl", "kill", "TERM", str(meta["service_target"])])
+        if rc != 0:
+            pid = read_pid(Path(meta["supervisor_pidfile"]))
+            if pid is not None and pid_is_alive(pid):
+                os.kill(pid, signal.SIGTERM)
+            elif output.strip():
+                raise SystemExit(output.strip())
+    else:
+        rc, output = run_capture(["systemctl", "--user", "stop", str(meta["service_target"])])
+        if rc != 0:
+            raise SystemExit(output.strip() or f"Failed to stop service {meta['service_target']}")
+
+    print(f"Requested clean stop for service {args.project_name}")
+    return 0
+
+
+def run_service_restart(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    ensure_runner_scripts_current(runner_root)
+    config_path = require_existing_path(resolve_projects_config_path(args.config, runner_root), "Config file")
+    meta = build_service_metadata(runner_root, config_path, args.project_name, args.service_dir)
+
+    if not Path(meta["install_path"]).exists():
+        install_args = argparse.Namespace(
+            project_name=args.project_name,
+            runner_root=args.runner_root,
+            home_config=args.home_config,
+            config=str(config_path),
+            service_dir=args.service_dir,
+            no_manager=False,
+        )
+        run_service_install(install_args)
+
+    if meta["manager"] == "launchctl":
+        status = collect_service_status(meta)
+        pid = status.get("supervisor_pid")
+        if not isinstance(pid, int) or not pid_is_alive(pid):
+            ensure_launchd_loaded(meta)
+            rc, output = run_capture(["launchctl", "kickstart", "-p", str(meta["service_target"])])
+            if rc != 0:
+                raise SystemExit(output.strip() or f"Failed to start service {meta['service_target']}")
+            print(f"Started service for {args.project_name}")
+            return 0
+
+        rc, output = run_capture(["launchctl", "kill", "TERM", str(meta["service_target"])])
+        if rc != 0:
+            raise SystemExit(output.strip() or f"Failed to signal service {meta['service_target']}")
+        if not wait_for_pid_exit(pid, int(meta["timeout_seconds"])):
+            raise SystemExit(
+                f"Timed out waiting for {args.project_name} to exit cleanly after {meta['timeout_seconds']} seconds."
+            )
+        rc, output = run_capture(["launchctl", "kickstart", "-p", str(meta["service_target"])])
+        if rc != 0:
+            raise SystemExit(output.strip() or f"Failed to restart service {meta['service_target']}")
+    else:
+        rc, output = run_capture(["systemctl", "--user", "restart", str(meta["service_target"])])
+        if rc != 0:
+            raise SystemExit(output.strip() or f"Failed to restart service {meta['service_target']}")
+
+    print(f"Restarted service for {args.project_name}")
+    return 0
+
+
+def run_service_status(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = require_existing_path(resolve_projects_config_path(args.config, runner_root), "Config file")
+    _payload, projects = load_projects_payload(config_path)
+
+    names = [args.project_name] if args.project_name else [str(item.get("name")) for item in projects if item.get("name")]
+    rows = [
+        collect_service_status(
+            build_service_metadata(runner_root, config_path, name, args.service_dir, require_service_runner=False)
+        )
+        for name in names
+    ]
+
+    if args.json:
+        print(json.dumps({"config": str(config_path), "services": rows}, indent=2))
+        return 0
+
+    print("Continuum service status")
+    print()
+    print(f"Runner: {runner_root}")
+    print(f"Config: {config_path}")
+    print()
+    if not rows:
+        print("No projects configured.")
+        return 0
+    for row in rows:
+        active_label = "active" if row.get("active") else "inactive"
+        installed_label = "installed" if row.get("installed") else "not-installed"
+        print(f"{row['project_name']} [{installed_label}, {active_label}]")
+        print(f"  Manager: {row['manager']}")
+        print(f"  Definition: {row['install_path']}")
+        print(f"  Target: {row['service_target']}")
+        if row.get("service_pid"):
+            print(f"  Service PID: {row['service_pid']}")
+        if row.get("supervisor_pid"):
+            state = "alive" if row.get("supervisor_running") else "stale"
+            print(f"  Supervisor PID: {row['supervisor_pid']} ({state})")
+        if row["manager"] == "systemd" and isinstance(row.get("fields"), dict):
+            fields = row["fields"]
+            if fields:
+                print(
+                    "  systemd: "
+                    f"LoadState={fields.get('LoadState', '?')}, "
+                    f"ActiveState={fields.get('ActiveState', '?')}, "
+                    f"SubState={fields.get('SubState', '?')}, "
+                    f"UnitFileState={fields.get('UnitFileState', '?')}"
+                )
+        print()
+    return 0
 
 
 def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
@@ -648,6 +1122,13 @@ def run_doctor(args: argparse.Namespace) -> int:
     ok, message = check_command("git")
     add_result(results, PASS if ok else FAIL, "git_cli", message)
 
+    if sys.platform == "darwin":
+        ok, message = check_command("launchctl")
+        add_result(results, PASS if ok else WARN, "service_manager", message if ok else "launchctl is not available; macOS service mode will be unavailable.")
+    elif sys.platform.startswith("linux"):
+        ok, message = check_command("systemctl")
+        add_result(results, PASS if ok else WARN, "service_manager", message if ok else "systemctl is not available; Linux service mode will be unavailable.")
+
     home_config = None
     if home_config_path.exists():
         try:
@@ -756,6 +1237,12 @@ def run_doctor(args: argparse.Namespace) -> int:
             add_result(results, FAIL, "runner_files", f"Runner root is missing required files: {', '.join(missing)}.")
         else:
             add_result(results, PASS, "runner_files", "Runner root contains the expected supervisor files and projects.json.")
+
+        service_runner = runner_root / "service_runner.py"
+        if service_runner.exists():
+            add_result(results, PASS, "service_runner", "Runner root includes service_runner.py for launchctl/systemd service mode.")
+        else:
+            add_result(results, WARN, "service_runner", "Runner root is missing service_runner.py. Run `continuum init` again to add service mode support.")
 
         projects_json_path = runner_root / "projects.json"
         projects_payload: dict[str, Any] | None = None
@@ -891,6 +1378,54 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
     restart.add_argument("--config", help="Explicit path to projects.json.")
 
+    service = subparsers.add_parser("service", help="Manage launchctl or systemd service mode.")
+    service_subparsers = service.add_subparsers(dest="service_command")
+
+    service_install = service_subparsers.add_parser("install", help="Install the service definition for one project.")
+    service_install.add_argument("project_name", help="Project name from projects.json.")
+    service_install.add_argument("--runner-root", help="Runner root to use.")
+    service_install.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    service_install.add_argument("--config", help="Explicit path to projects.json.")
+    service_install.add_argument("--service-dir", help="Override the service definition directory.")
+    service_install.add_argument("--no-manager", action="store_true", help="Only write the service definition; do not call launchctl or systemctl.")
+
+    service_uninstall = service_subparsers.add_parser("uninstall", help="Remove the service definition for one project.")
+    service_uninstall.add_argument("project_name", help="Project name from projects.json.")
+    service_uninstall.add_argument("--runner-root", help="Runner root to use.")
+    service_uninstall.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    service_uninstall.add_argument("--config", help="Explicit path to projects.json.")
+    service_uninstall.add_argument("--service-dir", help="Override the service definition directory.")
+    service_uninstall.add_argument("--no-manager", action="store_true", help="Only remove the service definition file; do not call launchctl or systemctl.")
+
+    service_start = service_subparsers.add_parser("start", help="Start one project through launchctl or systemd.")
+    service_start.add_argument("project_name", help="Project name from projects.json.")
+    service_start.add_argument("--runner-root", help="Runner root to use.")
+    service_start.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    service_start.add_argument("--config", help="Explicit path to projects.json.")
+    service_start.add_argument("--service-dir", help="Override the service definition directory.")
+
+    service_stop = service_subparsers.add_parser("stop", help="Stop one project through launchctl or systemd.")
+    service_stop.add_argument("project_name", help="Project name from projects.json.")
+    service_stop.add_argument("--runner-root", help="Runner root to use.")
+    service_stop.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    service_stop.add_argument("--config", help="Explicit path to projects.json.")
+    service_stop.add_argument("--service-dir", help="Override the service definition directory.")
+
+    service_restart = service_subparsers.add_parser("restart", help="Restart one project through launchctl or systemd.")
+    service_restart.add_argument("project_name", help="Project name from projects.json.")
+    service_restart.add_argument("--runner-root", help="Runner root to use.")
+    service_restart.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    service_restart.add_argument("--config", help="Explicit path to projects.json.")
+    service_restart.add_argument("--service-dir", help="Override the service definition directory.")
+
+    service_status = service_subparsers.add_parser("status", help="Show launchctl or systemd status for one or all projects.")
+    service_status.add_argument("project_name", nargs="?", help="Optional single project name to inspect.")
+    service_status.add_argument("--runner-root", help="Runner root to use.")
+    service_status.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    service_status.add_argument("--config", help="Explicit path to projects.json.")
+    service_status.add_argument("--service-dir", help="Override the service definition directory.")
+    service_status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
     status = subparsers.add_parser("status", help="Show project status from the runner state files.")
     status.add_argument("project_name", nargs="?", help="Optional single project name to inspect.")
     status.add_argument("--runner-root", help="Runner root to use.")
@@ -921,6 +1456,21 @@ def main(argv: list[str] | None = None) -> int:
         return run_stop(args)
     if args.command == "restart":
         return run_restart(args)
+    if args.command == "service":
+        if args.service_command == "install":
+            return run_service_install(args)
+        if args.service_command == "uninstall":
+            return run_service_uninstall(args)
+        if args.service_command == "start":
+            return run_service_start(args)
+        if args.service_command == "stop":
+            return run_service_stop(args)
+        if args.service_command == "restart":
+            return run_service_restart(args)
+        if args.service_command == "status":
+            return run_service_status(args)
+        parser.parse_args(["service", "--help"])
+        return 0
     if args.command == "status":
         return run_status(args)
     if args.command == "doctor":

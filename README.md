@@ -18,6 +18,7 @@ Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 - records per-project logs and runtime state
 - retries temporary rate limits and stops on surfaced hard quota exhaustion
 - works on Unix-like systems, with built-in `caffeinate` sleep prevention on macOS
+- can run under `launchctl` on macOS or `systemd --user` on Linux for a cleaner long-lived background runtime
 - can expose project status and controls through SwiftBar
 - can make milestone commits and pushes if your Codex rules allow Git commands
 
@@ -26,7 +27,7 @@ Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 1. Put reusable Codex profiles in `~/.codex/config.toml`.
 2. Run `continuum init` to create or refresh the runner and home config.
 3. Run `continuum enable` with a repo path and a long-term project goal.
-4. Launch that project with `continuum start <name>`.
+4. Launch that project with `continuum start <name>` or `continuum service start <name>`.
 5. Continuum keeps resuming the same Codex thread until the model ends with `STATUS: DONE` or `STATUS: BLOCKED: ...`.
 
 Only repos you explicitly enable become autonomous.
@@ -71,26 +72,64 @@ Launch it:
 ./continuum start my-project
 ```
 
+Or use the service-managed path:
+
+```bash
+./continuum service install my-project
+./continuum service start my-project
+```
+
 That is enough to start one autonomous project. For the full from-scratch walkthrough, see [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md).
 
 ## Day-to-day commands
 
-Launch:
+Ad hoc detached launch:
 
 ```bash
 ./continuum start my-project
 ```
 
-Graceful restart:
+Ad hoc graceful restart:
 
 ```bash
 ./continuum restart my-project
 ```
 
-Graceful stop:
+Ad hoc graceful stop:
 
 ```bash
 ./continuum stop my-project
+```
+
+Install service mode:
+
+```bash
+./continuum service install my-project
+```
+
+Start through `launchctl` or `systemd --user`:
+
+```bash
+./continuum service start my-project
+```
+
+Service status:
+
+```bash
+./continuum service status
+./continuum service status my-project
+```
+
+Service restart:
+
+```bash
+./continuum service restart my-project
+```
+
+Service stop:
+
+```bash
+./continuum service stop my-project
 ```
 
 Check the overall install:
@@ -125,16 +164,18 @@ If you use SwiftBar, enable the project once with `continuum enable` and then us
 
 - Continuum is project-specific by design. Repos that are not in `projects.json` remain ordinary interactive Codex repos.
 - The runner is plain Python and shell, so the core flow is not macOS-only.
-- On macOS, project launches start `caffeinate -is -w <supervisor-pid>`. This is intentional and prevents idle system sleep while a worker is active.
+- On macOS, both detached launches and service mode keep the machine awake while a worker is active. The detached path uses `caffeinate -is -w <supervisor-pid>`, and service mode does the same inside `service_runner.py`.
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time; it only reacts to surfaced Codex failures.
 - Temporary rate limits back off and retry. Surfaced hard quota exhaustion stops the worker and records the failure.
-- Launches use `nohup`, so you can close the launch terminal after the worker starts.
+- Detached launches use `nohup`, so you can close the launch terminal after the worker starts.
+- Service mode is the cleaner long-lived runtime: `launchctl` on macOS and `systemd --user` on Linux.
 - Milestone commits and pushes require Codex rules that allow `git add`, `git commit`, and `git push` outside the sandbox.
 - The supervisor path does not require the interactive Stop hook.
 
 ## Repository layout
 
 - [supervisor/](supervisor/): runner scripts, project enabler, example config
+- [supervisor/service_runner.py](supervisor/service_runner.py): foreground wrapper for launchctl and systemd service mode
 - [samples/](samples/): sample Codex config, AGENTS files, optional hook files
 - [continuum](continuum): CLI entry point, starting with `continuum doctor`
 - [scripts/install_home.py](scripts/install_home.py): writes `~/.config/continuum/config.toml` and a `~/continuum-runner` alias

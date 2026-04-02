@@ -137,11 +137,20 @@ It also auto-detects common planning docs such as `README.md`, `docs/ROADMAP.md`
 
 ## 6. Launch and monitor it
 
-Launch the project:
+For a quick detached run:
 
 ```bash
 "$KIT_ROOT/continuum" start "$PROJECT_NAME"
 ```
+
+For the `launchctl`-managed service path, which is the cleaner long-lived background runtime on macOS:
+
+```bash
+"$KIT_ROOT/continuum" service install "$PROJECT_NAME"
+"$KIT_ROOT/continuum" service start "$PROJECT_NAME"
+```
+
+Both paths write the same project logs and state files.
 
 Tail the worker log:
 
@@ -153,6 +162,12 @@ Inspect saved state:
 
 ```bash
 "$KIT_ROOT/continuum" status "$PROJECT_NAME"
+```
+
+Inspect the `launchctl` service definition and runtime state:
+
+```bash
+"$KIT_ROOT/continuum" service status "$PROJECT_NAME"
 ```
 
 What to expect:
@@ -180,9 +195,21 @@ Graceful stop:
 
 `restart_project.sh` and `stop_project.sh` do not force-kill the active `codex exec` pass. They wait for a clean boundary.
 
+Service-mode restart:
+
+```bash
+"$KIT_ROOT/continuum" service restart "$PROJECT_NAME"
+```
+
+Service-mode stop:
+
+```bash
+"$KIT_ROOT/continuum" service stop "$PROJECT_NAME"
+```
+
 ## 8. Sleep, credits, and other common questions
 
-- On macOS, launches start `caffeinate -is -w <supervisor-pid>`. This is intentional and prevents idle system sleep while the worker is active.
+- On macOS, both detached launches and service mode prevent idle sleep while the worker is active.
 - The display can still sleep. Closing the laptop lid can still put the Mac to sleep.
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time.
 - Temporary rate limits back off and retry.

@@ -330,6 +330,7 @@ def main() -> int:
     print("")
     print("Next step:")
     print(f"  continuum start {project_name}")
+    print(f"  continuum service start {project_name}")
     print("  or")
     print(f"  cd {runner_root}")
     print(f"  ./launch_project.sh {project_name}")
