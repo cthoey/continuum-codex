@@ -125,7 +125,10 @@ run_worker() {
   fi
 
   write_restart_state "$RESTART_STATEFILE" "$PROJECT_NAME" "waiting" "Waiting for the current pass to finish before restarting." "$target_pid"
-  kill "$target_pid"
+  if service_installed; then
+    signal_service_term
+  fi
+  kill "$target_pid" 2>/dev/null || true
 
   local deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
   while kill -0 "$target_pid" 2>/dev/null; do
@@ -196,6 +199,41 @@ RESTART_PIDFILE="$HERE/restart.${SLUG}.pid"
 RESTART_STATEFILE="$HERE/restart.${SLUG}.json"
 CONTROL_STATEFILE="$HERE/control.${SLUG}.json"
 WAIT_TIMEOUT_SECONDS="${CODEX_RESTART_WAIT_TIMEOUT_SECONDS:-7200}"
+LAUNCHD_SERVICE="$HOME/Library/LaunchAgents/dev.continuum.codex.${SLUG}.plist"
+LAUNCHD_TARGET="gui/$(id -u)/dev.continuum.codex.${SLUG}"
+SYSTEMD_SERVICE="$HOME/.config/systemd/user/continuum-${SLUG}.service"
+SYSTEMD_TARGET="continuum-${SLUG}.service"
+
+service_installed() {
+  [[ -f "$LAUNCHD_SERVICE" || -f "$SYSTEMD_SERVICE" ]]
+}
+
+start_service_managed() {
+  if [[ -f "$LAUNCHD_SERVICE" ]] && command -v launchctl >/dev/null 2>&1; then
+    if ! launchctl print "$LAUNCHD_TARGET" >/dev/null 2>&1; then
+      launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_SERVICE" >/dev/null 2>&1 || return 1
+    fi
+    launchctl kickstart -p "$LAUNCHD_TARGET" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+
+  if [[ -f "$SYSTEMD_SERVICE" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || return 1
+    systemctl --user start "$SYSTEMD_TARGET" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+
+  return 1
+}
+
+signal_service_term() {
+  if [[ -f "$LAUNCHD_SERVICE" ]] && command -v launchctl >/dev/null 2>&1; then
+    launchctl kill TERM "$LAUNCHD_TARGET" >/dev/null 2>&1 || true
+  fi
+  if [[ -f "$SYSTEMD_SERVICE" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user kill --signal=TERM "$SYSTEMD_TARGET" >/dev/null 2>&1 || true
+  fi
+}
 
 if [[ -n "$TARGET_PID" ]]; then
   run_worker "$TARGET_PID"
@@ -219,6 +257,19 @@ if [[ -f "$PIDFILE" ]]; then
     echo "Requested graceful restart for '$PROJECT_NAME'; waiting for supervisor PID $PID to exit."
     exit 0
   fi
+fi
+
+if service_installed; then
+  cleanup_caffeinate_pidfile
+  cleanup_restart_files
+  rm -f "$CONTROL_STATEFILE" "$PIDFILE"
+  if start_service_managed; then
+    echo "Started service-managed project '$PROJECT_NAME'"
+    exit 0
+  fi
+  write_restart_state "$RESTART_STATEFILE" "$PROJECT_NAME" "failed" "Service-managed restart could not start the service."
+  emit_notification_event "restart_failed" "error" "Continuum restart failed: $PROJECT_NAME" "Service-managed restart could not start the service." "failed"
+  exit 1
 fi
 
 cleanup_caffeinate_pidfile

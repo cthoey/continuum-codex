@@ -181,7 +181,7 @@ class ContinuumCliIntegrationTests(unittest.TestCase):
         self.assertIn("service_runner.py", contents)
         self.assertIn(self.project_name, contents)
 
-    def test_pause_and_force_stop_update_runtime_state(self) -> None:
+    def test_pause_and_stop_now_update_runtime_state(self) -> None:
         self.init_runner()
         self.write_fake_codex(
             textwrap.dedent(
@@ -254,7 +254,7 @@ class ContinuumCliIntegrationTests(unittest.TestCase):
         )
         self.wait_for(lambda: self.status_json().get("overall_status") == "running")
         self.continuum(
-            "force-stop",
+            "stop-now",
             self.project_name,
             "--runner-root",
             str(self.runner),

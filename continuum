@@ -806,6 +806,13 @@ def run_stop(args: argparse.Namespace) -> int:
     return invoke_subprocess([str(script), args.project_name])
 
 
+def run_stop_now(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = resolve_projects_config_path(args.config, runner_root)
+    script = require_runner_script(runner_root, "stop_now_project.sh")
+    return invoke_subprocess([str(script), args.project_name, str(config_path)])
+
+
 def run_restart(args: argparse.Namespace) -> int:
     runner_root = require_runner_root(args.runner_root, args.home_config)
     config_path = resolve_projects_config_path(args.config, runner_root)
@@ -820,10 +827,7 @@ def run_pause(args: argparse.Namespace) -> int:
 
 
 def run_force_stop(args: argparse.Namespace) -> int:
-    runner_root = require_runner_root(args.runner_root, args.home_config)
-    config_path = resolve_projects_config_path(args.config, runner_root)
-    script = require_runner_script(runner_root, "force_stop_project.sh")
-    return invoke_subprocess([str(script), args.project_name, str(config_path)])
+    return run_stop_now(args)
 
 
 def run_force_restart(args: argparse.Namespace) -> int:
@@ -1327,6 +1331,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             "launch_project.sh",
             "pause_project.sh",
             "restart_project.sh",
+            "stop_now_project.sh",
             "stop_project.sh",
             "projects.json",
         ]
@@ -1465,10 +1470,16 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
     start.add_argument("--config", help="Explicit path to projects.json.")
 
-    stop = subparsers.add_parser("stop", help="Request a clean stop for one project.")
+    stop = subparsers.add_parser("stop", help="Request a clean stop after the current pass for one project.")
     stop.add_argument("project_name", help="Project name from projects.json.")
     stop.add_argument("--runner-root", help="Runner root to use.")
     stop.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+
+    stop_now = subparsers.add_parser("stop-now", help="Stop one project as soon as possible.")
+    stop_now.add_argument("project_name", help="Project name from projects.json.")
+    stop_now.add_argument("--runner-root", help="Runner root to use.")
+    stop_now.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    stop_now.add_argument("--config", help="Explicit path to projects.json.")
 
     restart = subparsers.add_parser("restart", help="Request a clean restart for one project.")
     restart.add_argument("project_name", help="Project name from projects.json.")
@@ -1481,7 +1492,7 @@ def build_parser() -> argparse.ArgumentParser:
     pause.add_argument("--runner-root", help="Runner root to use.")
     pause.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
 
-    force_stop = subparsers.add_parser("force-stop", help="Immediately kill one running detached project.")
+    force_stop = subparsers.add_parser("force-stop", help="Compatibility alias for `stop-now`.")
     force_stop.add_argument("project_name", help="Project name from projects.json.")
     force_stop.add_argument("--runner-root", help="Runner root to use.")
     force_stop.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
@@ -1569,6 +1580,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_start(args)
     if args.command == "stop":
         return run_stop(args)
+    if args.command == "stop-now":
+        return run_stop_now(args)
     if args.command == "restart":
         return run_restart(args)
     if args.command == "pause":

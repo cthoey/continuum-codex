@@ -25,6 +25,10 @@ CAFFEINATE_PIDFILE="$HERE/caffeinate.${SLUG}.pid"
 RESTART_PIDFILE="$HERE/restart.${SLUG}.pid"
 RESTART_STATEFILE="$HERE/restart.${SLUG}.json"
 CONTROL_STATEFILE="$HERE/control.${SLUG}.json"
+LAUNCHD_SERVICE="$HOME/Library/LaunchAgents/dev.continuum.codex.${SLUG}.plist"
+LAUNCHD_TARGET="gui/$(id -u)/dev.continuum.codex.${SLUG}"
+SYSTEMD_SERVICE="$HOME/.config/systemd/user/continuum-${SLUG}.service"
+SYSTEMD_TARGET="continuum-${SLUG}.service"
 
 cleanup_caffeinate() {
   if [[ ! -f "$CAFFEINATE_PIDFILE" ]]; then
@@ -54,7 +58,27 @@ cleanup_control() {
   rm -f "$CONTROL_STATEFILE"
 }
 
+signal_service_term() {
+  local signaled="false"
+  if [[ -f "$LAUNCHD_SERVICE" ]] && command -v launchctl >/dev/null 2>&1; then
+    launchctl kill TERM "$LAUNCHD_TARGET" >/dev/null 2>&1 || true
+    signaled="true"
+  fi
+  if [[ -f "$SYSTEMD_SERVICE" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user kill --signal=TERM "$SYSTEMD_TARGET" >/dev/null 2>&1 || true
+    signaled="true"
+  fi
+  [[ "$signaled" == "true" ]]
+}
+
 if [[ ! -f "$PIDFILE" ]]; then
+  if signal_service_term; then
+    cleanup_caffeinate
+    cleanup_restart
+    cleanup_control
+    echo "Requested clean stop for service-managed project '$PROJECT_NAME'"
+    exit 0
+  fi
   cleanup_caffeinate
   cleanup_restart
   cleanup_control
@@ -64,6 +88,14 @@ fi
 
 PID="$(cat "$PIDFILE" 2>/dev/null || true)"
 if [[ -z "$PID" ]]; then
+  if signal_service_term; then
+    cleanup_caffeinate
+    cleanup_restart
+    cleanup_control
+    rm -f "$PIDFILE"
+    echo "Requested clean stop for service-managed project '$PROJECT_NAME'"
+    exit 0
+  fi
   cleanup_caffeinate
   cleanup_restart
   cleanup_control
@@ -73,6 +105,7 @@ if [[ -z "$PID" ]]; then
 fi
 
 if kill -0 "$PID" 2>/dev/null; then
+  signal_service_term >/dev/null 2>&1 || true
   kill "$PID"
   cleanup_caffeinate
   cleanup_restart

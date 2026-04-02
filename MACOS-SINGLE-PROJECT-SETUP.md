@@ -201,6 +201,12 @@ Graceful stop:
 
 `restart_project.sh` and `stop_project.sh` do not force-kill the active `codex exec` pass. They wait for a clean boundary.
 
+Stop as soon as possible:
+
+```bash
+"$KIT_ROOT/continuum" stop-now "$PROJECT_NAME"
+```
+
 Pause after the current pass:
 
 ```bash
@@ -219,7 +225,7 @@ Service-mode stop:
 "$KIT_ROOT/continuum" service stop "$PROJECT_NAME"
 ```
 
-Detached-mode emergency stop:
+Compatibility alias for `stop-now`:
 
 ```bash
 "$KIT_ROOT/continuum" force-stop "$PROJECT_NAME"
@@ -231,7 +237,7 @@ Detached-mode emergency restart:
 "$KIT_ROOT/continuum" force-restart "$PROJECT_NAME"
 ```
 
-Those force controls immediately kill the active Codex subprocess. Use them only when the graceful controls are not enough.
+`stop-now` first sends `TERM`, waits briefly, then escalates to `KILL` only if the worker is still running. Use it only when the graceful controls are not enough. `force-stop` is kept as a compatibility alias for the same behavior.
 
 ## 8. Sleep, credits, and other common questions
 

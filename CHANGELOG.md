@@ -19,6 +19,9 @@ the `0.x` phase while the install shape and operator workflow continue to evolve
 - added richer notification events, a runner event log, optional external command/webhook delivery, and inactivity alerts
 - added CLI integration tests covering enablement, service definitions, pause/force-stop behavior, inactivity detection, and runtime notifications
 - added a Linux single-project setup guide centered on `systemd --user`, lingering, and Linux-specific sleep expectations
+- clarified stop semantics with a first-class `stop-now` command and a TERM-then-KILL emergency stop path
+- made start, stop, and restart controls service-aware so the same control surface can target detached or service-managed projects
+- stabilized the home-level install contract around `~/.config/continuum/config.toml` and `~/continuum-runner`
 
 ## [0.1.0] - 2026-04-02
 

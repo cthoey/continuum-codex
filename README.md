@@ -34,6 +34,8 @@ Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 
 Only repos you explicitly enable become autonomous.
 
+The stable home-level control path is `~/.config/continuum/config.toml` plus `~/continuum-runner`.
+
 ## Quick start
 
 Install Codex CLI, log in once, and create a runner:
@@ -103,13 +105,19 @@ Ad hoc graceful stop:
 ./continuum stop my-project
 ```
 
+Ad hoc stop-as-soon-as-possible:
+
+```bash
+./continuum stop-now my-project
+```
+
 Pause after the current pass:
 
 ```bash
 ./continuum pause my-project
 ```
 
-Detached-mode force stop:
+Compatibility alias for `stop-now`:
 
 ```bash
 ./continuum force-stop my-project
@@ -184,7 +192,7 @@ Inspect the runner event log:
 tail -f ~/continuum-runner/continuum-notify.log
 ```
 
-If you use SwiftBar, enable the project once with `continuum enable` and then use the menu bar plugin to start, stop, and restart it.
+If you use SwiftBar, enable the project once with `continuum enable` and then use the menu bar plugin to start, restart, `Stop after pass`, or `Stop now`.
 
 ## Testing
 
@@ -194,11 +202,12 @@ Run the integration suite from the repo root:
 python3 -m unittest discover -s tests -v
 ```
 
-These tests exercise the real `continuum` CLI against temporary repos and runner directories, including enablement, service definition generation, pause and force-stop behavior, inactivity detection, and notification/state output.
+These tests exercise the real `continuum` CLI against temporary repos and runner directories, including enablement, service definition generation, pause and stop-now behavior, inactivity detection, and notification/state output.
 
 ## Operational notes
 
 - Continuum is project-specific by design. Repos that are not in `projects.json` remain ordinary interactive Codex repos.
+- The stable install target is the home-level pair `~/.config/continuum/config.toml` and `~/continuum-runner`. Other paths should be treated as implementation detail or development setup.
 - The runner is plain Python and shell, so the core flow is not macOS-only.
 - On macOS, both detached launches and service mode keep the machine awake while a worker is active. The detached path uses `caffeinate -is -w <supervisor-pid>`, and service mode does the same inside `service_runner.py`.
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time; it only reacts to surfaced Codex failures.
@@ -206,8 +215,11 @@ These tests exercise the real `continuum` CLI against temporary repos and runner
 - Long-running passes with no new `codex.log` activity for `inactivity_notify_after_seconds` move into an `inactive` state and emit a notification event once.
 - Detached launches use `nohup`, so you can close the launch terminal after the worker starts.
 - Service mode is the cleaner long-lived runtime: `launchctl` on macOS and `systemd --user` on Linux.
+- `continuum stop` is the graceful boundary action. It lets the current pass finish, then stops before the next pass starts.
+- `continuum stop-now` is the emergency stop path. It first sends `TERM`, waits briefly, then escalates to `KILL` only if the worker is still running.
 - `continuum pause` is a controlled boundary action: it lets the current pass finish, then stops before the next pass starts.
-- `continuum force-stop` and `continuum force-restart` are detached-mode emergency controls. They immediately kill the active Codex subprocess and should be used only when the normal graceful controls are not enough.
+- `continuum force-stop` is kept as a compatibility alias for `continuum stop-now`.
+- `continuum force-restart` remains the detached-mode emergency restart control and should be used only when the normal graceful controls are not enough.
 - Notification delivery is configured in `projects.json`: `notify`, `notification_command`, `notification_webhook_url`, `notification_webhook_timeout_seconds`, and `inactivity_notify_after_seconds`.
 - `notification_command` receives one extra argument containing the JSON event payload. `notification_webhook_url` gets the same payload as a simple HTTP POST.
 - Milestone commits and pushes require Codex rules that allow `git add`, `git commit`, and `git push` outside the sandbox.
@@ -219,7 +231,8 @@ These tests exercise the real `continuum` CLI against temporary repos and runner
 - [supervisor/service_runner.py](supervisor/service_runner.py): foreground wrapper for launchctl and systemd service mode
 - [supervisor/continuum_notify.py](supervisor/continuum_notify.py): shared event log, local notifications, external command, and webhook delivery
 - [supervisor/pause_project.sh](supervisor/pause_project.sh): request a pause after the current pass
-- [supervisor/force_stop_project.sh](supervisor/force_stop_project.sh): detached-mode emergency stop
+- [supervisor/stop_now_project.sh](supervisor/stop_now_project.sh): stop one project as soon as possible, escalating from `TERM` to `KILL` only when needed
+- [supervisor/force_stop_project.sh](supervisor/force_stop_project.sh): compatibility wrapper for `stop_now_project.sh`
 - [supervisor/force_restart_project.sh](supervisor/force_restart_project.sh): detached-mode emergency restart
 - [samples/](samples/): sample Codex config, AGENTS files, optional hook files
 - [tests/](tests/): integration tests for the CLI, runner state model, and notifier flow
