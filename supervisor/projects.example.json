@@ -1,0 +1,21 @@
+{
+  "codex_bin": "codex",
+  "default_profile": "autonomous",
+  "default_followup_prompt": "Proceed with the project. Continue from your last checkpoint. Update the progress notes. Choose the next highest-value task yourself. Only stop when you are actually DONE or BLOCKED. End with exactly one status line: STATUS: CONTINUE, STATUS: DONE, or STATUS: BLOCKED: <reason>.",
+  "supervisor_root": "./runtime",
+  "notify": false,
+  "rate_limit_retry_seconds": 900,
+  "max_rate_limit_retries": 8,
+  "projects": [
+    {
+      "name": "my-project",
+      "path": "/absolute/path/to/project",
+      "prompt": "Work autonomously on this project. The overall project goal is to <repeat the long-term project goal here>. Follow the repo AGENTS.md instructions, keep progress notes updated, choose the next highest-value task yourself, install useful tools when the current environment allows it, create git commits and pushes for major validated milestones, and continue until you are DONE or truly BLOCKED.",
+      "profile": "autonomous",
+      "max_passes": 0,
+      "resume_existing": true,
+      "enabled": true,
+      "extra_args": []
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+# ~/.codex/config.toml
+# Copy this file to ~/.codex/config.toml and adjust paths/settings.
+
+# Recommended current default model for most Codex tasks.
+model = "gpt-5.4"
+
+# Keep exec/TUI logs shorter.
+hide_agent_reasoning = true
+
+# Optional: use API-key auth only for unattended/programmatic workflows.
+# forced_login_method = "api"
+
+# Optional external notification hook.
+# Copy supervisor/notify.py somewhere permanent and update this path.
+# notify = ["python3", "/Users/you/codex-runner/notify.py"]
+
+# Optional: useful if you want Codex to stay active while a turn is running.
+[features]
+prevent_idle_sleep = true
+codex_hooks = true
+
+# A dedicated unattended profile. Use this profile from the supervisor.
+[profiles.autonomous]
+model = "gpt-5.4"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+# Network is off by default in workspace-write. Turn it on only if needed.
+[profiles.autonomous.sandbox_workspace_write]
+network_access = false
+
+# A lighter/faster profile for cheaper background sub-tasks.
+[profiles.autonomous_fast]
+model = "gpt-5.4-mini"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[profiles.autonomous_fast.sandbox_workspace_write]
+network_access = false

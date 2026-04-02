@@ -1,0 +1,10 @@
+# ~/.codex/AGENTS.md
+
+## Global working defaults
+- Do not revert unrelated existing changes.
+- Prefer small, validated changes over large speculative rewrites.
+- Explain when sandbox limits block a necessary command.
+- Prefer project-local guidance over generic assumptions.
+- For interactive or non-autonomous work, do not create commits unless explicitly asked.
+- For autonomous supervisor-driven projects, create git commits and pushes for major validated milestones.
+- Keep autonomous milestone commits focused and descriptive.
