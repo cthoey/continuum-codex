@@ -21,6 +21,7 @@ Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 - works on Unix-like systems, with built-in `caffeinate` sleep prevention on macOS
 - can run under `launchctl` on macOS or `systemd --user` on Linux for a cleaner long-lived background runtime
 - can expose project status and controls through SwiftBar
+- can emit local alerts, append a runner event log, call an external notification command, or POST a webhook payload
 - can make milestone commits and pushes if your Codex rules allow Git commands
 
 ## How it works
@@ -177,6 +178,12 @@ cat ~/continuum-runner/runtime/my-project/state/status.json
 cat ~/continuum-runner/runtime/my-project/state/last_message.md
 ```
 
+Inspect the runner event log:
+
+```bash
+tail -f ~/continuum-runner/continuum-notify.log
+```
+
 If you use SwiftBar, enable the project once with `continuum enable` and then use the menu bar plugin to start, stop, and restart it.
 
 ## Operational notes
@@ -186,10 +193,13 @@ If you use SwiftBar, enable the project once with `continuum enable` and then us
 - On macOS, both detached launches and service mode keep the machine awake while a worker is active. The detached path uses `caffeinate -is -w <supervisor-pid>`, and service mode does the same inside `service_runner.py`.
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time; it only reacts to surfaced Codex failures.
 - Temporary rate limits back off and retry. Surfaced hard quota exhaustion stops the worker and records the failure.
+- Long-running passes with no new `codex.log` activity for `inactivity_notify_after_seconds` move into an `inactive` state and emit a notification event once.
 - Detached launches use `nohup`, so you can close the launch terminal after the worker starts.
 - Service mode is the cleaner long-lived runtime: `launchctl` on macOS and `systemd --user` on Linux.
 - `continuum pause` is a controlled boundary action: it lets the current pass finish, then stops before the next pass starts.
 - `continuum force-stop` and `continuum force-restart` are detached-mode emergency controls. They immediately kill the active Codex subprocess and should be used only when the normal graceful controls are not enough.
+- Notification delivery is configured in `projects.json`: `notify`, `notification_command`, `notification_webhook_url`, `notification_webhook_timeout_seconds`, and `inactivity_notify_after_seconds`.
+- `notification_command` receives one extra argument containing the JSON event payload. `notification_webhook_url` gets the same payload as a simple HTTP POST.
 - Milestone commits and pushes require Codex rules that allow `git add`, `git commit`, and `git push` outside the sandbox.
 - The supervisor path does not require the interactive Stop hook.
 
@@ -197,6 +207,7 @@ If you use SwiftBar, enable the project once with `continuum enable` and then us
 
 - [supervisor/](supervisor/): runner scripts, project enabler, example config
 - [supervisor/service_runner.py](supervisor/service_runner.py): foreground wrapper for launchctl and systemd service mode
+- [supervisor/continuum_notify.py](supervisor/continuum_notify.py): shared event log, local notifications, external command, and webhook delivery
 - [supervisor/pause_project.sh](supervisor/pause_project.sh): request a pause after the current pass
 - [supervisor/force_stop_project.sh](supervisor/force_stop_project.sh): detached-mode emergency stop
 - [supervisor/force_restart_project.sh](supervisor/force_restart_project.sh): detached-mode emergency restart

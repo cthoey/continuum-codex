@@ -369,6 +369,8 @@ def derive_overall_status(row: dict[str, Any]) -> str:
     supervisor_running = bool(row.get("supervisor_running"))
     if state_kind == "running":
         return "running" if supervisor_running else "stale"
+    if state_kind == "inactive":
+        return "inactive" if supervisor_running else "stale"
     if state_kind == "rate_limited_wait":
         return "waiting" if supervisor_running else "stale"
     if state_kind == "paused":
@@ -1318,6 +1320,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     if runner_root and (runner_root.exists() or runner_root.is_symlink()):
         required_files = [
             "codex_supervisor.py",
+            "continuum_notify.py",
             "enable_project.py",
             "force_restart_project.sh",
             "force_stop_project.sh",

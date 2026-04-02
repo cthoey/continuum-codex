@@ -170,6 +170,12 @@ Inspect the `launchctl` service definition and runtime state:
 "$KIT_ROOT/continuum" service status "$PROJECT_NAME"
 ```
 
+Tail the runner event log:
+
+```bash
+tail -f ~/continuum-runner/continuum-notify.log
+```
+
 What to expect:
 
 - the first pass uses `codex exec`
@@ -235,6 +241,9 @@ Those force controls immediately kill the active Codex subprocess. Use them only
 - Temporary rate limits back off and retry.
 - Surfaced hard quota exhaustion stops the worker and records the failure.
 - `continuum status` now distinguishes useful runtime states such as `running`, `paused`, `force-stopped`, `waiting`, `blocked`, `failed`, and `done`.
+- Long-running passes with no fresh `codex.log` activity for `inactivity_notify_after_seconds` move into an `inactive` state and emit one notification event.
+- The runner appends all notification events to `~/continuum-runner/continuum-notify.log` even if desktop notifications are disabled.
+- If you want external delivery, add `notification_command` or `notification_webhook_url` in `~/continuum-runner/projects.json`.
 - After you restore credits or limits, launch or restart the project again.
 
 ## 9. Keep other repos non-autonomous

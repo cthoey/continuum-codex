@@ -3,6 +3,54 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+emit_notification_event() {
+  local event_type="$1"
+  local severity="$2"
+  local title="$3"
+  local message="$4"
+  local phase="${5:-}"
+
+  local helper="$HERE/continuum_notify.py"
+  local config_path="${CONFIG:-$HERE/projects.json}"
+
+  python3 - "$PROJECT_NAME" "$event_type" "$severity" "$title" "$message" "$phase" "$helper" "$config_path" <<'PY'
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+project_name = sys.argv[1]
+event_type = sys.argv[2]
+severity = sys.argv[3]
+title = sys.argv[4]
+message = sys.argv[5]
+phase = sys.argv[6]
+helper = Path(sys.argv[7]).resolve()
+config = Path(sys.argv[8]).expanduser().resolve()
+
+payload = {
+    "timestamp": datetime.now(timezone.utc).isoformat(),
+    "event_type": event_type,
+    "severity": severity,
+    "project": project_name,
+    "title": title,
+    "message": message,
+}
+if phase:
+    payload["phase"] = phase
+
+subprocess.run(
+    [sys.executable, str(helper), "--config", str(config), "--payload", json.dumps(payload)],
+    check=False,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+PY
+}
+
 write_restart_state() {
   local statefile="$1"
   local project_name="$2"
@@ -86,6 +134,7 @@ run_worker() {
         kill "$temp_caffeinate_pid" 2>/dev/null || true
       fi
       write_restart_state "$RESTART_STATEFILE" "$PROJECT_NAME" "timed_out" "Timed out waiting for the supervisor to exit cleanly after ${WAIT_TIMEOUT_SECONDS} seconds." "$target_pid"
+      emit_notification_event "restart_timed_out" "warn" "Continuum restart timed out: $PROJECT_NAME" "Timed out waiting for the supervisor to exit cleanly after ${WAIT_TIMEOUT_SECONDS} seconds." "timed_out"
       rm -f "$RESTART_PIDFILE"
       exit 1
     fi
@@ -107,6 +156,7 @@ run_worker() {
   fi
 
   write_restart_state "$RESTART_STATEFILE" "$PROJECT_NAME" "failed" "Relaunch failed after the supervisor exited."
+  emit_notification_event "restart_failed" "error" "Continuum restart failed: $PROJECT_NAME" "Relaunch failed after the supervisor exited." "failed"
   exit 1
 }
 

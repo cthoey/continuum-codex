@@ -4,6 +4,10 @@
   "default_followup_prompt": "Proceed with the project. Continue from your last checkpoint. Update the progress notes. Choose the next highest-value task yourself. Only stop when you are actually DONE or BLOCKED. End with exactly one status line: STATUS: CONTINUE, STATUS: DONE, or STATUS: BLOCKED: <reason>.",
   "supervisor_root": "./runtime",
   "notify": false,
+  "notification_command": [],
+  "notification_webhook_url": "",
+  "notification_webhook_timeout_seconds": 10,
+  "inactivity_notify_after_seconds": 1800,
   "rate_limit_retry_seconds": 900,
   "max_rate_limit_retries": 8,
   "projects": [

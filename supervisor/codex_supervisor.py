@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from continuum_notify import emit_notification
+
 STATUS_CONTINUE = "CONTINUE"
 STATUS_DONE = "DONE"
 STATUS_BLOCKED = "BLOCKED"
@@ -44,6 +46,7 @@ STATUS_INTERRUPTED = "INTERRUPTED"
 STATUS_RATE_LIMIT_WAIT = "RATE_LIMIT_WAIT"
 
 STATE_RUNNING = "running"
+STATE_INACTIVE = "inactive"
 STATE_RATE_LIMIT_WAIT = "rate_limited_wait"
 STATE_PAUSED = "paused"
 STATE_STOPPED = "stopped"
@@ -108,6 +111,10 @@ class RuntimeConfig:
     default_followup_prompt: str = DEFAULT_FOLLOWUP_PROMPT
     supervisor_root: str = "./supervisor_state"
     notify: bool = True
+    notification_command: list[str] = field(default_factory=list)
+    notification_webhook_url: str | None = None
+    notification_webhook_timeout_seconds: int = 10
+    inactivity_notify_after_seconds: int = 30 * 60
     rate_limit_retry_seconds: int = DEFAULT_RATE_LIMIT_RETRY_SECONDS
     max_rate_limit_retries: int = DEFAULT_MAX_RATE_LIMIT_RETRIES
     projects: list[ProjectConfig] = field(default_factory=list)
@@ -167,6 +174,14 @@ def load_config(path: Path) -> RuntimeConfig:
         default_followup_prompt=raw.get("default_followup_prompt", DEFAULT_FOLLOWUP_PROMPT),
         supervisor_root=raw.get("supervisor_root", "./supervisor_state"),
         notify=bool(raw.get("notify", True)),
+        notification_command=list(raw.get("notification_command", []))
+        if isinstance(raw.get("notification_command"), list)
+        else [],
+        notification_webhook_url=raw.get("notification_webhook_url")
+        if isinstance(raw.get("notification_webhook_url"), str) and raw.get("notification_webhook_url")
+        else None,
+        notification_webhook_timeout_seconds=int(raw.get("notification_webhook_timeout_seconds", 10)),
+        inactivity_notify_after_seconds=int(raw.get("inactivity_notify_after_seconds", 30 * 60)),
         rate_limit_retry_seconds=int(raw.get("rate_limit_retry_seconds", DEFAULT_RATE_LIMIT_RETRY_SECONDS)),
         max_rate_limit_retries=int(raw.get("max_rate_limit_retries", DEFAULT_MAX_RATE_LIMIT_RETRIES)),
         projects=projects,
@@ -271,29 +286,35 @@ def build_base_exec_args(runtime: RuntimeConfig, project: ProjectConfig) -> list
     return args
 
 
-def notify_local(title: str, message: str) -> None:
-    system = platform.system().lower()
-    try:
-        if system == "darwin" and shutil.which("osascript"):
-            subprocess.run(
-                [
-                    "osascript",
-                    "-e",
-                    f'display notification "{message.replace("\"", "\\\"")}" with title "{title.replace("\"", "\\\"")}"',
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        elif system == "linux" and shutil.which("notify-send"):
-            subprocess.run(
-                ["notify-send", title, message],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-    except Exception:
-        pass
+def emit_runtime_notification(
+    runtime: RuntimeConfig,
+    runner_root: Path,
+    *,
+    event_type: str,
+    project: ProjectConfig,
+    title: str,
+    message: str,
+    severity: str = "info",
+    **extra: Any,
+) -> None:
+    payload: dict[str, Any] = {
+        "timestamp": utcnow_iso(),
+        "event_type": event_type,
+        "severity": severity,
+        "project": project.name,
+        "project_path": project.path,
+        "title": title,
+        "message": message,
+    }
+    payload.update(extra)
+    emit_notification(
+        runner_root=runner_root,
+        enabled=runtime.notify,
+        payload=payload,
+        notification_command=runtime.notification_command,
+        notification_webhook_url=runtime.notification_webhook_url,
+        notification_webhook_timeout_seconds=runtime.notification_webhook_timeout_seconds,
+    )
 
 
 def classify_failure_signal(text: str) -> FailureSignal | None:
@@ -356,6 +377,9 @@ def run_codex_command(
     cmd: list[str],
     log_path: Path,
     on_start: Callable[[int], None] | None = None,
+    inactivity_after_seconds: int = 0,
+    on_inactive: Callable[[int], None] | None = None,
+    on_activity_resumed: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
     ensure_dir(log_path.parent)
     start_offset = log_path.stat().st_size if log_path.exists() else 0
@@ -373,6 +397,38 @@ def run_codex_command(
         )
         if on_start is not None:
             on_start(proc.pid)
+        last_activity_ts = time.time()
+        try:
+            last_activity_ts = max(last_activity_ts, log_path.stat().st_mtime)
+        except Exception:
+            pass
+        inactivity_notified = False
+
+        while True:
+            try:
+                proc.wait(timeout=2.0)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+
+            try:
+                observed_mtime = log_path.stat().st_mtime
+                if observed_mtime > last_activity_ts + 0.01:
+                    last_activity_ts = observed_mtime
+                    if inactivity_notified:
+                        inactivity_notified = False
+                        if on_activity_resumed is not None:
+                            on_activity_resumed()
+            except Exception:
+                pass
+
+            if inactivity_after_seconds > 0 and not inactivity_notified:
+                inactive_for = int(time.time() - last_activity_ts)
+                if inactive_for >= inactivity_after_seconds:
+                    inactivity_notified = True
+                    if on_inactive is not None:
+                        on_inactive(inactive_for)
+
         stdout_text, _ = proc.communicate()
         final_message = stdout_text or ""
         log_file.write(f"[{utcnow_iso()}] EXIT CODE: {proc.returncode}\n")
@@ -481,7 +537,80 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                 ),
             )
 
-        exit_code, final_message, log_excerpt = run_codex_command(cmd, log_path, on_start=on_codex_start)
+        def on_inactive(inactive_for: int) -> None:
+            write_json(
+                state_path,
+                build_state_payload(
+                    runtime,
+                    project,
+                    phase,
+                    pass_num,
+                    STATE_INACTIVE,
+                    prior_state=prior_state,
+                    last_status="RUNNING",
+                    status_detail=f"No log activity for {inactive_for} seconds.",
+                    command=cmd,
+                    pass_started_at=pass_started_at,
+                    active_codex_pid=load_json_file(state_path).get("active_codex_pid"),
+                    inactivity_detected_at=utcnow_iso(),
+                    inactivity_seconds=inactive_for,
+                    last_message_file=str(last_message_path),
+                    log_file=str(log_path),
+                ),
+            )
+            emit_runtime_notification(
+                runtime,
+                control_root,
+                event_type="inactivity",
+                project=project,
+                title=f"Continuum inactive: {project.name}",
+                message=f"No Codex log activity for {inactive_for // 60 if inactive_for >= 60 else inactive_for}{'m' if inactive_for >= 60 else 's'}.",
+                severity="warn",
+                inactivity_seconds=inactive_for,
+                phase=phase,
+                pass_num=pass_num,
+            )
+
+        def on_activity_resumed() -> None:
+            write_json(
+                state_path,
+                build_state_payload(
+                    runtime,
+                    project,
+                    phase,
+                    pass_num,
+                    STATE_RUNNING,
+                    prior_state=prior_state,
+                    last_status="RUNNING",
+                    status_detail="Codex pass is running.",
+                    command=cmd,
+                    pass_started_at=pass_started_at,
+                    active_codex_pid=load_json_file(state_path).get("active_codex_pid"),
+                    inactivity_cleared_at=utcnow_iso(),
+                    last_message_file=str(last_message_path),
+                    log_file=str(log_path),
+                ),
+            )
+            emit_runtime_notification(
+                runtime,
+                control_root,
+                event_type="activity_resumed",
+                project=project,
+                title=f"Continuum active again: {project.name}",
+                message="Codex log activity resumed.",
+                severity="info",
+                phase=phase,
+                pass_num=pass_num,
+            )
+
+        exit_code, final_message, log_excerpt = run_codex_command(
+            cmd,
+            log_path,
+            on_start=on_codex_start,
+            inactivity_after_seconds=runtime.inactivity_notify_after_seconds,
+            on_inactive=on_inactive,
+            on_activity_resumed=on_activity_resumed,
+        )
         write_text(last_message_path, final_message)
         parsed = parse_status(final_message)
 
@@ -532,8 +661,17 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                 )
                 write_json(state_path, state_payload)
                 echo(f"[{project.name}] BLOCKED: {msg}")
-                if runtime.notify:
-                    notify_local(f"Codex quota blocked: {project.name}", msg[:200])
+                emit_runtime_notification(
+                    runtime,
+                    control_root,
+                    event_type="quota_blocked",
+                    project=project,
+                    title=f"Continuum quota blocked: {project.name}",
+                    message=msg[:240],
+                    severity="error",
+                    phase=phase,
+                    pass_num=pass_num,
+                )
                 return
 
             if failure_signal and failure_signal.kind == "rate_limited":
@@ -561,11 +699,19 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                         f"{retry_count}/{runtime.max_rate_limit_retries} in "
                         f"{runtime.rate_limit_retry_seconds}s"
                     )
-                    if runtime.notify:
-                        notify_local(
-                            f"Codex waiting: {project.name}",
-                            f"Retrying after rate limit in {runtime.rate_limit_retry_seconds}s",
-                        )
+                    emit_runtime_notification(
+                        runtime,
+                        control_root,
+                        event_type="rate_limited",
+                        project=project,
+                        title=f"Continuum waiting: {project.name}",
+                        message=f"Retrying after rate limit in {runtime.rate_limit_retry_seconds}s",
+                        severity="warn",
+                        phase=phase,
+                        pass_num=pass_num,
+                        retry_count=retry_count,
+                        retry_after_seconds=runtime.rate_limit_retry_seconds,
+                    )
                     wait_result = sleep_with_control(runtime.rate_limit_retry_seconds, control_path)
                     if wait_result == "pause_requested":
                         pause_request = consume_control_action(control_path, CONTROL_ACTION_PAUSE) or {}
@@ -579,6 +725,17 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                         }
                         write_json(state_path, paused_state)
                         echo(f"[{project.name}] paused while waiting after rate limit")
+                        emit_runtime_notification(
+                            runtime,
+                            control_root,
+                            event_type="paused",
+                            project=project,
+                            title=f"Continuum paused: {project.name}",
+                            message="Paused while waiting to retry after a rate limit.",
+                            severity="info",
+                            phase=phase,
+                            pass_num=pass_num,
+                        )
                         return
                     prior_state = state_payload
                     if wait_result != "completed":
@@ -607,8 +764,18 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                 )
                 write_json(state_path, state_payload)
                 echo(f"[{project.name}] BLOCKED: rate limited too many times")
-                if runtime.notify:
-                    notify_local(f"Codex blocked: {project.name}", "Rate limited too many times")
+                emit_runtime_notification(
+                    runtime,
+                    control_root,
+                    event_type="rate_limit_blocked",
+                    project=project,
+                    title=f"Continuum blocked: {project.name}",
+                    message="Rate limited too many times",
+                    severity="error",
+                    phase=phase,
+                    pass_num=pass_num,
+                    retry_count=retry_count,
+                )
                 return
 
             state_payload.update(
@@ -622,8 +789,18 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             )
             write_json(state_path, state_payload)
             echo(f"[{project.name}] Codex exited non-zero ({exit_code}); stopping")
-            if runtime.notify:
-                notify_local(f"Codex failed: {project.name}", f"Exit code {exit_code}")
+            emit_runtime_notification(
+                runtime,
+                control_root,
+                event_type="failed",
+                project=project,
+                title=f"Continuum failed: {project.name}",
+                message=f"Exit code {exit_code}",
+                severity="error",
+                phase=phase,
+                pass_num=pass_num,
+                exit_code=exit_code,
+            )
             return
 
         if parsed.kind == STATUS_CONTINUE:
@@ -640,6 +817,17 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                 }
                 write_json(state_path, paused_state)
                 echo(f"[{project.name}] paused after current pass")
+                emit_runtime_notification(
+                    runtime,
+                    control_root,
+                    event_type="paused",
+                    project=project,
+                    title=f"Continuum paused: {project.name}",
+                    message="Paused after the current pass finished.",
+                    severity="info",
+                    phase=phase,
+                    pass_num=pass_num,
+                )
                 return
             echo(f"[{project.name}] requested CONTINUE")
             state_payload.update({"state_kind": STATE_RUNNING})
@@ -650,8 +838,17 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             state_payload.update({"state_kind": STATE_DONE})
             write_json(state_path, state_payload)
             echo(f"[{project.name}] DONE")
-            if runtime.notify:
-                notify_local(f"Codex done: {project.name}", "Task completed")
+            emit_runtime_notification(
+                runtime,
+                control_root,
+                event_type="done",
+                project=project,
+                title=f"Continuum done: {project.name}",
+                message="Task completed",
+                severity="info",
+                phase=phase,
+                pass_num=pass_num,
+            )
             return
 
         if parsed.kind == STATUS_BLOCKED:
@@ -659,8 +856,17 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             state_payload.update({"state_kind": STATE_BLOCKED})
             write_json(state_path, state_payload)
             echo(f"[{project.name}] BLOCKED: {msg}")
-            if runtime.notify:
-                notify_local(f"Codex blocked: {project.name}", msg[:200])
+            emit_runtime_notification(
+                runtime,
+                control_root,
+                event_type="blocked",
+                project=project,
+                title=f"Continuum blocked: {project.name}",
+                message=msg[:240],
+                severity="warn",
+                phase=phase,
+                pass_num=pass_num,
+            )
             return
 
         # Unknown status: try exactly one corrective resume, then stop on the next unknown.
@@ -682,6 +888,17 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             }
             write_json(state_path, paused_state)
             echo(f"[{project.name}] paused after current pass")
+            emit_runtime_notification(
+                runtime,
+                control_root,
+                event_type="paused",
+                project=project,
+                title=f"Continuum paused: {project.name}",
+                message="Paused after the current pass finished.",
+                severity="info",
+                phase=phase,
+                pass_num=pass_num,
+            )
             return
 
         if unknown_count <= 1:
@@ -707,8 +924,17 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             "failure_kind": "missing_status_line",
         }
         write_json(state_path, failed_state)
-        if runtime.notify:
-            notify_local(f"Codex needs review: {project.name}", "Missing STATUS line")
+        emit_runtime_notification(
+            runtime,
+            control_root,
+            event_type="needs_review",
+            project=project,
+            title=f"Continuum needs review: {project.name}",
+            message="Missing STATUS line twice",
+            severity="warn",
+            phase=phase,
+            pass_num=pass_num,
+        )
         return
 
     if STOP_EVENT.is_set():
