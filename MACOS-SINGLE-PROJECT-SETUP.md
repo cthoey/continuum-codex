@@ -195,6 +195,12 @@ Graceful stop:
 
 `restart_project.sh` and `stop_project.sh` do not force-kill the active `codex exec` pass. They wait for a clean boundary.
 
+Pause after the current pass:
+
+```bash
+"$KIT_ROOT/continuum" pause "$PROJECT_NAME"
+```
+
 Service-mode restart:
 
 ```bash
@@ -207,6 +213,20 @@ Service-mode stop:
 "$KIT_ROOT/continuum" service stop "$PROJECT_NAME"
 ```
 
+Detached-mode emergency stop:
+
+```bash
+"$KIT_ROOT/continuum" force-stop "$PROJECT_NAME"
+```
+
+Detached-mode emergency restart:
+
+```bash
+"$KIT_ROOT/continuum" force-restart "$PROJECT_NAME"
+```
+
+Those force controls immediately kill the active Codex subprocess. Use them only when the graceful controls are not enough.
+
 ## 8. Sleep, credits, and other common questions
 
 - On macOS, both detached launches and service mode prevent idle sleep while the worker is active.
@@ -214,6 +234,7 @@ Service-mode stop:
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time.
 - Temporary rate limits back off and retry.
 - Surfaced hard quota exhaustion stops the worker and records the failure.
+- `continuum status` now distinguishes useful runtime states such as `running`, `paused`, `force-stopped`, `waiting`, `blocked`, `failed`, and `done`.
 - After you restore credits or limits, launch or restart the project again.
 
 ## 9. Keep other repos non-autonomous

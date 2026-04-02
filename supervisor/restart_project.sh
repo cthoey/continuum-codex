@@ -144,6 +144,7 @@ PIDFILE="$HERE/supervisor.${SLUG}.pid"
 CAFFEINATE_PIDFILE="$HERE/caffeinate.${SLUG}.pid"
 RESTART_PIDFILE="$HERE/restart.${SLUG}.pid"
 RESTART_STATEFILE="$HERE/restart.${SLUG}.json"
+CONTROL_STATEFILE="$HERE/control.${SLUG}.json"
 WAIT_TIMEOUT_SECONDS="${CODEX_RESTART_WAIT_TIMEOUT_SECONDS:-7200}"
 
 if [[ -n "$TARGET_PID" ]]; then
@@ -172,5 +173,6 @@ fi
 
 cleanup_caffeinate_pidfile
 cleanup_restart_files
+rm -f "$CONTROL_STATEFILE"
 rm -f "$PIDFILE"
 exec "$HERE/launch_project.sh" "$PROJECT_NAME" "$CONFIG"

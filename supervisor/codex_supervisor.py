@@ -33,14 +33,27 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 STATUS_CONTINUE = "CONTINUE"
 STATUS_DONE = "DONE"
 STATUS_BLOCKED = "BLOCKED"
 STATUS_UNKNOWN = "UNKNOWN"
 STATUS_FAILED = "FAILED"
+STATUS_INTERRUPTED = "INTERRUPTED"
 STATUS_RATE_LIMIT_WAIT = "RATE_LIMIT_WAIT"
+
+STATE_RUNNING = "running"
+STATE_RATE_LIMIT_WAIT = "rate_limited_wait"
+STATE_PAUSED = "paused"
+STATE_STOPPED = "stopped"
+STATE_FORCE_STOPPED = "force_stopped"
+STATE_DONE = "done"
+STATE_BLOCKED = "blocked"
+STATE_FAILED = "failed"
+STATE_MAX_PASSES = "max_passes"
+
+CONTROL_ACTION_PAUSE = "pause_after_pass"
 
 STATUS_RE = re.compile(r"^STATUS:\s*(CONTINUE|DONE|BLOCKED)(?::\s*(.*))?\s*$", re.MULTILINE)
 QUOTA_PATTERNS = [
@@ -200,6 +213,16 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def load_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(read_text(path))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def parse_status(message: str) -> ParsedStatus:
     matches = list(STATUS_RE.finditer(message))
     if not matches:
@@ -208,6 +231,31 @@ def parse_status(message: str) -> ParsedStatus:
     kind = last.group(1)
     detail = (last.group(2) or "").strip()
     return ParsedStatus(kind, detail)
+
+
+def build_state_payload(
+    runtime: RuntimeConfig,
+    project: ProjectConfig,
+    phase: str | None,
+    pass_num: int,
+    state_kind: str,
+    prior_state: dict[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    prior_state = prior_state or {}
+    payload: dict[str, Any] = {
+        "state_version": 2,
+        "project": project.name,
+        "updated_at": utcnow_iso(),
+        "phase": phase,
+        "pass_num": pass_num,
+        "state_kind": state_kind,
+        "path": project.path,
+        "profile": project.profile or runtime.default_profile,
+        "started_at": prior_state.get("started_at") or utcnow_iso(),
+    }
+    payload.update(extra)
+    return payload
 
 
 def build_base_exec_args(runtime: RuntimeConfig, project: ProjectConfig) -> list[str]:
@@ -279,14 +327,43 @@ def sleep_with_stop(seconds: int) -> bool:
     return False
 
 
-def run_codex_command(cmd: list[str], log_path: Path) -> tuple[int, str, str]:
+def sleep_with_control(seconds: int, control_path: Path) -> str:
+    deadline = time.time() + max(seconds, 0)
+    while not STOP_EVENT.is_set():
+        control = load_json_file(control_path)
+        if control.get("action") == CONTROL_ACTION_PAUSE:
+            return "pause_requested"
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return "completed"
+        time.sleep(min(2.0, remaining))
+    return "stop_requested"
+
+
+def consume_control_action(control_path: Path, action: str) -> dict[str, Any] | None:
+    control = load_json_file(control_path)
+    if control.get("action") != action:
+        return None
+    control_path.unlink(missing_ok=True)
+    return control
+
+
+def clear_control_file(control_path: Path) -> None:
+    control_path.unlink(missing_ok=True)
+
+
+def run_codex_command(
+    cmd: list[str],
+    log_path: Path,
+    on_start: Callable[[int], None] | None = None,
+) -> tuple[int, str, str]:
     ensure_dir(log_path.parent)
     start_offset = log_path.stat().st_size if log_path.exists() else 0
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write("\n" + "=" * 80 + "\n")
         log_file.write(f"[{utcnow_iso()}] RUN: {' '.join(cmd)}\n")
         log_file.flush()
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=log_file,
@@ -294,7 +371,10 @@ def run_codex_command(cmd: list[str], log_path: Path) -> tuple[int, str, str]:
             encoding="utf-8",
             errors="replace",
         )
-        final_message = proc.stdout or ""
+        if on_start is not None:
+            on_start(proc.pid)
+        stdout_text, _ = proc.communicate()
+        final_message = stdout_text or ""
         log_file.write(f"[{utcnow_iso()}] EXIT CODE: {proc.returncode}\n")
         log_file.flush()
     try:
@@ -306,7 +386,7 @@ def run_codex_command(cmd: list[str], log_path: Path) -> tuple[int, str, str]:
     return proc.returncode, final_message, log_excerpt
 
 
-def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -> None:
+def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, control_root: Path) -> None:
     name_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", project.name)
     project_root = root / name_slug
     logs_dir = project_root / "logs"
@@ -317,6 +397,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
     state_path = state_dir / "status.json"
     last_message_path = state_dir / "last_message.md"
     log_path = logs_dir / "codex.log"
+    control_path = control_root / f"control.{name_slug}.json"
 
     pass_num = 0
     prior_state: dict[str, Any] = {}
@@ -332,24 +413,39 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
             echo(f"[{project.name}] reached max_passes={project.max_passes}; stopping.")
             write_json(
                 state_path,
-                {
-                    "project": project.name,
-                    "updated_at": utcnow_iso(),
-                    "pass_num": pass_num,
-                    "final_status": "MAX_PASSES",
-                },
+                build_state_payload(
+                    runtime,
+                    project,
+                    prior_state.get("phase"),
+                    pass_num,
+                    STATE_MAX_PASSES,
+                    prior_state=prior_state,
+                    last_status=prior_state.get("last_status"),
+                    status_detail=f"Reached max_passes={project.max_passes}.",
+                    finished_at=utcnow_iso(),
+                    active_codex_pid=None,
+                    last_message_file=str(last_message_path),
+                    log_file=str(log_path),
+                ),
             )
             return
 
         should_resume = False
         retry_phase = prior_state.get("retry_phase") if prior_state else None
+        resumable_statuses = {STATUS_CONTINUE, STATUS_UNKNOWN, STATUS_INTERRUPTED, STATUS_RATE_LIMIT_WAIT, "RUNNING"}
+        resumable_states = {STATE_RUNNING, STATE_RATE_LIMIT_WAIT, STATE_PAUSED, STATE_STOPPED, STATE_FORCE_STOPPED}
         if retry_phase == "initial":
             should_resume = False
         elif retry_phase == "resume":
             should_resume = True
-        elif pass_num > 0:
+        elif pass_num > 0 and (
+            prior_state.get("last_status") in resumable_statuses or prior_state.get("state_kind") in resumable_states
+        ):
             should_resume = True
-        elif project.resume_existing and prior_state.get("last_status") in {STATUS_CONTINUE, STATUS_UNKNOWN, "RUNNING", "INTERRUPTED"}:
+        elif project.resume_existing and (
+            prior_state.get("last_status") in resumable_statuses
+            or prior_state.get("state_kind") in resumable_states
+        ):
             should_resume = True
 
         base_args = build_base_exec_args(runtime, project)
@@ -363,39 +459,63 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
 
         pass_num += 1
         echo(f"[{project.name}] pass {pass_num} ({phase}) starting")
-        write_json(
-            state_path,
-            {
-                "project": project.name,
-                "updated_at": utcnow_iso(),
-                "phase": phase,
-                "pass_num": pass_num,
-                "last_status": "RUNNING",
-                "path": project.path,
-                "profile": project.profile or runtime.default_profile,
-                "command": cmd,
-            },
-        )
+        pass_started_at = utcnow_iso()
 
-        exit_code, final_message, log_excerpt = run_codex_command(cmd, log_path)
+        def on_codex_start(pid: int) -> None:
+            write_json(
+                state_path,
+                build_state_payload(
+                    runtime,
+                    project,
+                    phase,
+                    pass_num,
+                    STATE_RUNNING,
+                    prior_state=prior_state,
+                    last_status="RUNNING",
+                    status_detail="Codex pass is running.",
+                    command=cmd,
+                    pass_started_at=pass_started_at,
+                    active_codex_pid=pid,
+                    last_message_file=str(last_message_path),
+                    log_file=str(log_path),
+                ),
+            )
+
+        exit_code, final_message, log_excerpt = run_codex_command(cmd, log_path, on_start=on_codex_start)
         write_text(last_message_path, final_message)
         parsed = parse_status(final_message)
 
-        state_payload: dict[str, Any] = {
-            "project": project.name,
-            "updated_at": utcnow_iso(),
-            "phase": phase,
-            "pass_num": pass_num,
-            "last_status": parsed.kind,
-            "status_detail": parsed.detail,
-            "exit_code": exit_code,
-            "path": project.path,
-            "profile": project.profile or runtime.default_profile,
-            "last_message_file": str(last_message_path),
-            "log_file": str(log_path),
-        }
+        finished_at = utcnow_iso()
+        state_payload: dict[str, Any] = build_state_payload(
+            runtime,
+            project,
+            phase,
+            pass_num,
+            STATE_RUNNING,
+            prior_state=prior_state,
+            last_status=parsed.kind,
+            status_detail=parsed.detail,
+            exit_code=exit_code,
+            pass_started_at=pass_started_at,
+            finished_at=finished_at,
+            active_codex_pid=None,
+            last_message_file=str(last_message_path),
+            log_file=str(log_path),
+        )
 
         write_json(state_path, state_payload)
+
+        if STOP_EVENT.is_set():
+            stopped_state = {
+                **state_payload,
+                "state_kind": STATE_STOPPED,
+                "last_status": parsed.kind if parsed.kind != STATUS_UNKNOWN else STATUS_INTERRUPTED,
+                "status_detail": "Stop requested after the current pass finished.",
+                "control_action": "stop_after_pass",
+            }
+            write_json(state_path, stopped_state)
+            echo(f"[{project.name}] stopped after current pass")
+            return
 
         if exit_code != 0:
             failure_signal = classify_failure_signal(f"{final_message}\n{log_excerpt}")
@@ -403,6 +523,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
                 msg = failure_signal.detail or "Quota or credits exhausted"
                 state_payload.update(
                     {
+                        "state_kind": STATE_BLOCKED,
                         "last_status": STATUS_BLOCKED,
                         "status_detail": msg,
                         "failure_kind": "quota_exhausted",
@@ -421,11 +542,16 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
                 if retry_count <= runtime.max_rate_limit_retries:
                     state_payload.update(
                         {
+                            "state_kind": STATE_RATE_LIMIT_WAIT,
                             "last_status": STATUS_RATE_LIMIT_WAIT,
                             "status_detail": msg,
                             "failure_kind": "rate_limited",
                             "rate_limit_retry_count": retry_count,
                             "retry_after_seconds": runtime.rate_limit_retry_seconds,
+                            "retry_after_at": datetime.fromtimestamp(
+                                time.time() + runtime.rate_limit_retry_seconds,
+                                tz=timezone.utc,
+                            ).isoformat(),
                             "retry_phase": phase,
                         }
                     )
@@ -440,13 +566,36 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
                             f"Codex waiting: {project.name}",
                             f"Retrying after rate limit in {runtime.rate_limit_retry_seconds}s",
                         )
+                    wait_result = sleep_with_control(runtime.rate_limit_retry_seconds, control_path)
+                    if wait_result == "pause_requested":
+                        pause_request = consume_control_action(control_path, CONTROL_ACTION_PAUSE) or {}
+                        paused_state = {
+                            **state_payload,
+                            "state_kind": STATE_PAUSED,
+                            "status_detail": "Paused while waiting to retry after a rate limit.",
+                            "control_action": CONTROL_ACTION_PAUSE,
+                            "control_requested_at": pause_request.get("requested_at"),
+                            "control_acknowledged_at": utcnow_iso(),
+                        }
+                        write_json(state_path, paused_state)
+                        echo(f"[{project.name}] paused while waiting after rate limit")
+                        return
                     prior_state = state_payload
-                    if not sleep_with_stop(runtime.rate_limit_retry_seconds):
+                    if wait_result != "completed":
+                        stopped_state = {
+                            **state_payload,
+                            "state_kind": STATE_STOPPED,
+                            "last_status": STATUS_INTERRUPTED,
+                            "status_detail": "Stop requested while waiting to retry after a rate limit.",
+                            "control_action": "stop_after_pass",
+                        }
+                        write_json(state_path, stopped_state)
                         return
                     continue
 
                 state_payload.update(
                     {
+                        "state_kind": STATE_BLOCKED,
                         "last_status": STATUS_BLOCKED,
                         "status_detail": (
                             f"Rate limited too many times ({retry_count - 1} retries): {msg}"
@@ -464,6 +613,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
 
             state_payload.update(
                 {
+                    "state_kind": STATE_FAILED,
                     "last_status": STATUS_FAILED,
                     "status_detail": f"Codex exited non-zero ({exit_code})",
                     "failure_kind": "nonzero_exit",
@@ -477,11 +627,28 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
             return
 
         if parsed.kind == STATUS_CONTINUE:
+            pause_request = consume_control_action(control_path, CONTROL_ACTION_PAUSE)
+            if pause_request is not None:
+                paused_state = {
+                    **state_payload,
+                    "state_kind": STATE_PAUSED,
+                    "last_status": STATUS_CONTINUE,
+                    "status_detail": "Pause requested after the current pass.",
+                    "control_action": CONTROL_ACTION_PAUSE,
+                    "control_requested_at": pause_request.get("requested_at"),
+                    "control_acknowledged_at": utcnow_iso(),
+                }
+                write_json(state_path, paused_state)
+                echo(f"[{project.name}] paused after current pass")
+                return
             echo(f"[{project.name}] requested CONTINUE")
+            state_payload.update({"state_kind": STATE_RUNNING})
             prior_state = state_payload
             continue
 
         if parsed.kind == STATUS_DONE:
+            state_payload.update({"state_kind": STATE_DONE})
+            write_json(state_path, state_payload)
             echo(f"[{project.name}] DONE")
             if runtime.notify:
                 notify_local(f"Codex done: {project.name}", "Task completed")
@@ -489,6 +656,8 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
 
         if parsed.kind == STATUS_BLOCKED:
             msg = parsed.detail or "Blocked"
+            state_payload.update({"state_kind": STATE_BLOCKED})
+            write_json(state_path, state_payload)
             echo(f"[{project.name}] BLOCKED: {msg}")
             if runtime.notify:
                 notify_local(f"Codex blocked: {project.name}", msg[:200])
@@ -499,6 +668,21 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
         unknown_count = previous_unknown_count + 1
         state_payload["unknown_count"] = unknown_count
         write_json(state_path, state_payload)
+
+        pause_request = consume_control_action(control_path, CONTROL_ACTION_PAUSE)
+        if pause_request is not None:
+            paused_state = {
+                **state_payload,
+                "state_kind": STATE_PAUSED,
+                "last_status": STATUS_UNKNOWN,
+                "status_detail": "Pause requested after the current pass.",
+                "control_action": CONTROL_ACTION_PAUSE,
+                "control_requested_at": pause_request.get("requested_at"),
+                "control_acknowledged_at": utcnow_iso(),
+            }
+            write_json(state_path, paused_state)
+            echo(f"[{project.name}] paused after current pass")
+            return
 
         if unknown_count <= 1:
             echo(f"[{project.name}] missing STATUS line; requesting a corrective follow-up")
@@ -515,9 +699,34 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path) -
             continue
 
         echo(f"[{project.name}] missing STATUS line twice; stopping")
+        failed_state = {
+            **state_payload,
+            "state_kind": STATE_FAILED,
+            "last_status": STATUS_UNKNOWN,
+            "status_detail": "Missing STATUS line twice; manual review needed.",
+            "failure_kind": "missing_status_line",
+        }
+        write_json(state_path, failed_state)
         if runtime.notify:
             notify_local(f"Codex needs review: {project.name}", "Missing STATUS line")
         return
+
+    if STOP_EVENT.is_set():
+        stopped_state = build_state_payload(
+            runtime,
+            project,
+            prior_state.get("phase"),
+            pass_num,
+            STATE_STOPPED,
+            prior_state=prior_state,
+            last_status=prior_state.get("last_status", STATUS_INTERRUPTED),
+            status_detail="Stop requested by signal.",
+            finished_at=utcnow_iso(),
+            active_codex_pid=None,
+            last_message_file=str(last_message_path),
+            log_file=str(log_path),
+        )
+        write_json(state_path, stopped_state)
 
 
 def install_signal_handlers() -> None:
@@ -551,6 +760,7 @@ def main(argv: list[str]) -> int:
     if not root.is_absolute():
         root = (config_path.parent / root).resolve()
     ensure_dir(root)
+    control_root = config_path.parent
 
     install_signal_handlers()
 
@@ -565,7 +775,7 @@ def main(argv: list[str]) -> int:
         project.path = str(project_path)
         t = threading.Thread(
             target=project_worker,
-            args=(runtime, project, root),
+            args=(runtime, project, root, control_root),
             name=f"codex-{project.name}",
             daemon=False,
         )

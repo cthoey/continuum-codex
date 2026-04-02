@@ -24,6 +24,7 @@ PIDFILE="$HERE/supervisor.${SLUG}.pid"
 CAFFEINATE_PIDFILE="$HERE/caffeinate.${SLUG}.pid"
 RESTART_PIDFILE="$HERE/restart.${SLUG}.pid"
 RESTART_STATEFILE="$HERE/restart.${SLUG}.json"
+CONTROL_STATEFILE="$HERE/control.${SLUG}.json"
 
 cleanup_caffeinate() {
   if [[ ! -f "$CAFFEINATE_PIDFILE" ]]; then
@@ -49,9 +50,14 @@ cleanup_restart() {
   rm -f "$RESTART_STATEFILE"
 }
 
+cleanup_control() {
+  rm -f "$CONTROL_STATEFILE"
+}
+
 if [[ ! -f "$PIDFILE" ]]; then
   cleanup_caffeinate
   cleanup_restart
+  cleanup_control
   echo "No PID file found for '$PROJECT_NAME': $PIDFILE" >&2
   exit 1
 fi
@@ -60,6 +66,7 @@ PID="$(cat "$PIDFILE" 2>/dev/null || true)"
 if [[ -z "$PID" ]]; then
   cleanup_caffeinate
   cleanup_restart
+  cleanup_control
   echo "PID file is empty for '$PROJECT_NAME': $PIDFILE" >&2
   rm -f "$PIDFILE"
   exit 1
@@ -69,11 +76,13 @@ if kill -0 "$PID" 2>/dev/null; then
   kill "$PID"
   cleanup_caffeinate
   cleanup_restart
+  cleanup_control
   echo "Sent TERM to project supervisor '$PROJECT_NAME' (PID $PID)"
   exit 0
 fi
 
 cleanup_caffeinate
 cleanup_restart
+cleanup_control
 rm -f "$PIDFILE"
 echo "No running project supervisor found for '$PROJECT_NAME'; removed stale PID file"

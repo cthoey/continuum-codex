@@ -355,6 +355,55 @@ def humanize_age(raw: str | None) -> str | None:
     return f"{delta // 86400}d ago"
 
 
+def derive_overall_status(row: dict[str, Any]) -> str:
+    restart_phase = row.get("restart_phase")
+    if restart_phase:
+        return f"restart:{restart_phase}"
+
+    control_action = row.get("control_action")
+    control_phase = row.get("control_phase")
+    if control_action == "pause_after_pass" and control_phase:
+        return f"pause:{control_phase}"
+
+    state_kind = row.get("state_kind")
+    supervisor_running = bool(row.get("supervisor_running"))
+    if state_kind == "running":
+        return "running" if supervisor_running else "stale"
+    if state_kind == "rate_limited_wait":
+        return "waiting" if supervisor_running else "stale"
+    if state_kind == "paused":
+        return "paused"
+    if state_kind == "stopped":
+        return "stopped"
+    if state_kind == "force_stopped":
+        return "force-stopped"
+    if state_kind == "done":
+        return "done"
+    if state_kind == "blocked":
+        return "blocked"
+    if state_kind == "failed":
+        return "failed"
+    if state_kind == "max_passes":
+        return "max-passes"
+
+    last_status = row.get("last_status")
+    if supervisor_running:
+        return "running"
+    if last_status == "DONE":
+        return "done"
+    if last_status == "BLOCKED":
+        return "blocked"
+    if last_status == "FAILED":
+        return "failed"
+    if last_status == "RATE_LIMIT_WAIT":
+        return "waiting"
+    if row.get("enabled") is False:
+        return "disabled"
+    if row.get("updated_at"):
+        return "idle"
+    return "not-started"
+
+
 def resolve_runtime_root(config_path: Path, payload: dict[str, Any]) -> Path:
     runtime_root = Path(str(payload.get("supervisor_root", "./runtime"))).expanduser()
     if not runtime_root.is_absolute():
@@ -762,6 +811,26 @@ def run_restart(args: argparse.Namespace) -> int:
     return invoke_subprocess([str(script), args.project_name, str(config_path)])
 
 
+def run_pause(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    script = require_runner_script(runner_root, "pause_project.sh")
+    return invoke_subprocess([str(script), args.project_name])
+
+
+def run_force_stop(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = resolve_projects_config_path(args.config, runner_root)
+    script = require_runner_script(runner_root, "force_stop_project.sh")
+    return invoke_subprocess([str(script), args.project_name, str(config_path)])
+
+
+def run_force_restart(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = resolve_projects_config_path(args.config, runner_root)
+    script = require_runner_script(runner_root, "force_restart_project.sh")
+    return invoke_subprocess([str(script), args.project_name, str(config_path)])
+
+
 def run_service_install(args: argparse.Namespace) -> int:
     runner_root = require_runner_root(args.runner_root, args.home_config)
     ensure_runner_scripts_current(runner_root)
@@ -986,16 +1055,23 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
         log_path = project_root / "logs" / "codex.log"
         pid_path = config_path.parent / f"supervisor.{slug}.pid"
         restart_state_path = config_path.parent / f"restart.{slug}.json"
+        control_state_path = config_path.parent / f"control.{slug}.json"
 
         state = load_json(state_path) if state_path.exists() else {}
         restart_state = load_json(restart_state_path) if restart_state_path.exists() else {}
+        control_state = load_json(control_state_path) if control_state_path.exists() else {}
         supervisor_pid = read_pid(pid_path)
         running = pid_is_alive(supervisor_pid)
 
         last_status = state.get("last_status")
+        state_kind = state.get("state_kind")
         phase = state.get("phase")
         pass_num = state.get("pass_num")
         updated_at = state.get("updated_at")
+        started_at = state.get("started_at")
+        pass_started_at = state.get("pass_started_at")
+        finished_at = state.get("finished_at")
+        active_codex_pid = state.get("active_codex_pid")
         activity_at = None
         if log_path.exists():
             activity_at = datetime.fromtimestamp(log_path.stat().st_mtime, tz=timezone.utc).isoformat()
@@ -1010,41 +1086,37 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
         if isinstance(restart_state, dict):
             restart_phase = restart_state.get("phase")
             restart_detail = restart_state.get("detail")
-
-        if restart_phase:
-            overall = f"restart:{restart_phase}"
-        elif running:
-            overall = "running"
-        elif last_status == "DONE":
-            overall = "done"
-        elif last_status == "BLOCKED":
-            overall = "blocked"
-        elif last_status == "FAILED":
-            overall = "failed"
-        elif last_status == "RATE_LIMIT_WAIT":
-            overall = "waiting"
-        elif item.get("enabled", True) is False:
-            overall = "disabled"
-        elif state:
-            overall = "idle"
-        else:
-            overall = "not-started"
+        control_action = None
+        control_phase = None
+        control_detail = None
+        if isinstance(control_state, dict):
+            control_action = control_state.get("action")
+            control_phase = control_state.get("phase")
+            control_detail = control_state.get("detail")
 
         row = {
             "name": name,
             "enabled": bool(item.get("enabled", True)),
             "path": item.get("path"),
             "profile": item.get("profile") or payload.get("default_profile"),
-            "overall_status": overall,
+            "overall_status": "",
+            "state_kind": state_kind,
             "last_status": last_status,
             "phase": phase,
             "pass_num": pass_num,
             "updated_at": updated_at,
             "updated_age": humanize_age(updated_at),
+            "started_at": started_at,
+            "started_age": humanize_age(started_at),
+            "pass_started_at": pass_started_at,
+            "pass_started_age": humanize_age(pass_started_at),
+            "finished_at": finished_at,
+            "finished_age": humanize_age(finished_at),
             "activity_at": activity_at,
             "activity_age": humanize_age(activity_at),
             "progress_at": progress_at,
             "progress_age": humanize_age(progress_at),
+            "active_codex_pid": active_codex_pid,
             "supervisor_pid": supervisor_pid,
             "supervisor_running": running,
             "state_path": str(state_path),
@@ -1052,7 +1124,11 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
             "log_path": str(log_path),
             "restart_phase": restart_phase,
             "restart_detail": restart_detail,
+            "control_action": control_action,
+            "control_phase": control_phase,
+            "control_detail": control_detail,
         }
+        row["overall_status"] = derive_overall_status(row)
         rows.append(row)
 
     return rows
@@ -1086,23 +1162,39 @@ def run_status(args: argparse.Namespace) -> int:
         print(f"  Repo: {row['path']}")
         if row.get("profile"):
             print(f"  Profile: {row['profile']}")
+        if row.get("state_kind"):
+            print(f"  State: {row['state_kind']}")
         if row.get("pass_num") is not None:
             phase = f" ({row['phase']})" if row.get("phase") else ""
             print(f"  Pass: {row['pass_num']}{phase}")
+        if row.get("started_at"):
+            suffix = f" ({row['started_age']})" if row.get("started_age") else ""
+            print(f"  Started: {format_timestamp(row['started_at'])}{suffix}")
+        if row.get("pass_started_at"):
+            suffix = f" ({row['pass_started_age']})" if row.get("pass_started_age") else ""
+            print(f"  Pass started: {format_timestamp(row['pass_started_at'])}{suffix}")
         if row.get("last_status"):
             print(f"  Last status: {row['last_status']}")
         if row.get("updated_at"):
             suffix = f" ({row['updated_age']})" if row.get("updated_age") else ""
             print(f"  Updated: {format_timestamp(row['updated_at'])}{suffix}")
+        if row.get("finished_at"):
+            suffix = f" ({row['finished_age']})" if row.get("finished_age") else ""
+            print(f"  Finished: {format_timestamp(row['finished_at'])}{suffix}")
         if row.get("activity_at"):
             suffix = f" ({row['activity_age']})" if row.get("activity_age") else ""
             print(f"  Last log activity: {format_timestamp(row['activity_at'])}{suffix}")
         if row.get("progress_at"):
             suffix = f" ({row['progress_age']})" if row.get("progress_age") else ""
             print(f"  Last progress checkpoint: {format_timestamp(row['progress_at'])}{suffix}")
+        if row.get("active_codex_pid"):
+            print(f"  Active Codex PID: {row['active_codex_pid']}")
         if row.get("supervisor_pid"):
             state = "alive" if row.get("supervisor_running") else "stale"
             print(f"  Supervisor PID: {row['supervisor_pid']} ({state})")
+        if row.get("control_action"):
+            detail = f": {row['control_detail']}" if row.get("control_detail") else ""
+            print(f"  Control: {row['control_action']} ({row.get('control_phase', 'requested')}){detail}")
         if row.get("restart_phase"):
             detail = f": {row['restart_detail']}" if row.get("restart_detail") else ""
             print(f"  Restart: {row['restart_phase']}{detail}")
@@ -1227,7 +1319,10 @@ def run_doctor(args: argparse.Namespace) -> int:
         required_files = [
             "codex_supervisor.py",
             "enable_project.py",
+            "force_restart_project.sh",
+            "force_stop_project.sh",
             "launch_project.sh",
+            "pause_project.sh",
             "restart_project.sh",
             "stop_project.sh",
             "projects.json",
@@ -1378,6 +1473,23 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
     restart.add_argument("--config", help="Explicit path to projects.json.")
 
+    pause = subparsers.add_parser("pause", help="Pause one project after the current pass finishes.")
+    pause.add_argument("project_name", help="Project name from projects.json.")
+    pause.add_argument("--runner-root", help="Runner root to use.")
+    pause.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+
+    force_stop = subparsers.add_parser("force-stop", help="Immediately kill one running detached project.")
+    force_stop.add_argument("project_name", help="Project name from projects.json.")
+    force_stop.add_argument("--runner-root", help="Runner root to use.")
+    force_stop.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    force_stop.add_argument("--config", help="Explicit path to projects.json.")
+
+    force_restart = subparsers.add_parser("force-restart", help="Immediately kill and relaunch one detached project.")
+    force_restart.add_argument("project_name", help="Project name from projects.json.")
+    force_restart.add_argument("--runner-root", help="Runner root to use.")
+    force_restart.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    force_restart.add_argument("--config", help="Explicit path to projects.json.")
+
     service = subparsers.add_parser("service", help="Manage launchctl or systemd service mode.")
     service_subparsers = service.add_subparsers(dest="service_command")
 
@@ -1456,6 +1568,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_stop(args)
     if args.command == "restart":
         return run_restart(args)
+    if args.command == "pause":
+        return run_pause(args)
+    if args.command == "force-stop":
+        return run_force_stop(args)
+    if args.command == "force-restart":
+        return run_force_restart(args)
     if args.command == "service":
         if args.service_command == "install":
             return run_service_install(args)

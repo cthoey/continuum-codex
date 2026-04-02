@@ -25,6 +25,7 @@ PIDFILE="$HERE/supervisor.${SLUG}.pid"
 CAFFEINATE_PIDFILE="$HERE/caffeinate.${SLUG}.pid"
 RESTART_PIDFILE="$HERE/restart.${SLUG}.pid"
 RESTART_STATEFILE="$HERE/restart.${SLUG}.json"
+CONTROL_STATEFILE="$HERE/control.${SLUG}.json"
 LOGFILE="$HERE/supervisor.${SLUG}.out.log"
 
 if [[ ! -f "$CONFIG" ]]; then
@@ -60,6 +61,10 @@ fi
 
 if [[ -f "$RESTART_STATEFILE" ]]; then
   rm -f "$RESTART_STATEFILE"
+fi
+
+if [[ -f "$CONTROL_STATEFILE" ]]; then
+  rm -f "$CONTROL_STATEFILE"
 fi
 
 nohup python3 "$HERE/codex_supervisor.py" "$CONFIG" "$PROJECT_NAME" >> "$LOGFILE" 2>&1 &
