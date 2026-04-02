@@ -1,0 +1,934 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+PASS = "PASS"
+WARN = "WARN"
+FAIL = "FAIL"
+
+HOME_CONFIG_DEFAULT = "~/.config/continuum/config.toml"
+CODEX_HOME_DEFAULT = "~/.codex"
+DEFAULT_HOME_RUNNER = "~/continuum-runner"
+MANAGED_MARKERS = [
+    ("<!-- continuum:begin -->", "<!-- continuum:end -->"),
+    ("<!-- codex-autonomous-kit:begin -->", "<!-- codex-autonomous-kit:end -->"),
+]
+
+
+@dataclass
+class CheckResult:
+    status: str
+    key: str
+    message: str
+
+
+def strip_toml_comment(line: str) -> str:
+    in_string = False
+    escaped = False
+    result: list[str] = []
+    for char in line:
+        if char == '"' and not escaped:
+            in_string = not in_string
+        if char == "#" and not in_string:
+            break
+        result.append(char)
+        escaped = (char == "\\") and not escaped
+        if char != "\\":
+            escaped = False
+    return "".join(result).strip()
+
+
+def split_toml_path(raw: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    in_string = False
+    escaped = False
+    for char in raw:
+        if char == '"' and not escaped:
+            in_string = not in_string
+            continue
+        if char == "." and not in_string:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            escaped = False
+            continue
+        current.append(char)
+        escaped = (char == "\\") and not escaped
+        if char != "\\":
+            escaped = False
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def parse_toml_value(raw: str) -> Any:
+    value = raw.strip()
+    if not value:
+        return ""
+    if value.startswith('"') and value.endswith('"'):
+        inner = value[1:-1]
+        return bytes(inner, "utf-8").decode("unicode_escape")
+    if value in {"true", "false"}:
+        return value == "true"
+    if re.fullmatch(r"[+-]?\d+", value):
+        return int(value)
+    return value
+
+
+def load_toml(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
+    try:
+        import tomllib  # type: ignore
+
+        return tomllib.loads(text)
+    except Exception:
+        data: dict[str, Any] = {}
+        section_path: list[str] = []
+        for raw_line in text.splitlines():
+            line = strip_toml_comment(raw_line)
+            if not line:
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section_path = split_toml_path(line[1:-1].strip())
+                continue
+            if "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            key = key.strip().strip('"')
+            value = parse_toml_value(raw_value)
+            node = data
+            for part in section_path:
+                node = node.setdefault(part, {})
+            node[key] = value
+        return data
+
+
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def lookup_path(data: dict[str, Any], *parts: str) -> Any:
+    node: Any = data
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def add_result(results: list[CheckResult], status: str, key: str, message: str) -> None:
+    results.append(CheckResult(status=status, key=key, message=message))
+
+
+def decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    try:
+        segments = token.split(".")
+        if len(segments) < 2:
+            return None
+        payload = segments[1]
+        payload += "=" * ((4 - len(payload) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        return json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def format_timestamp(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return raw
+
+
+def detect_runner_root(args: argparse.Namespace, home_config: dict[str, Any] | None) -> tuple[Path | None, str]:
+    if args.runner_root:
+        return Path(args.runner_root).expanduser(), "--runner-root"
+
+    for env_name in ("CONTINUUM_RUNNER_ROOT", "RELAY_RUNNER_ROOT", "CODEX_RUNNER_ROOT"):
+        value = os.environ.get(env_name)
+        if value:
+            return Path(value).expanduser(), f"${env_name}"
+
+    if home_config:
+        runner_root = home_config.get("runner_root")
+        if isinstance(runner_root, str) and runner_root.strip():
+            return Path(runner_root).expanduser(), args.home_config
+
+    default_path = Path(DEFAULT_HOME_RUNNER).expanduser()
+    if default_path.exists() or default_path.is_symlink():
+        return default_path, "default"
+
+    return None, "unresolved"
+
+
+def check_command(binary: str) -> tuple[bool, str]:
+    path = shutil.which(binary)
+    if not path:
+        return False, f"{binary} not found on PATH"
+    try:
+        completed = subprocess.run(
+            [binary, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        preferred = [line for line in lines if not line.lower().startswith("warning:")]
+        version = preferred[-1] if preferred else (lines[-1] if lines else "version unknown")
+        return True, f"{binary} found at {path} ({version})"
+    except Exception:
+        return True, f"{binary} found at {path}"
+
+
+def check_git_repo(path: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == "true"
+
+
+def has_git_rule(text: str, command: str) -> bool:
+    pattern = re.compile(
+        rf'prefix_rule\(\s*pattern=\["git",\s*"{re.escape(command)}"(?:,\s*".*?")*\],\s*decision="allow"\s*\)'
+    )
+    return bool(pattern.search(text))
+
+
+def file_contains_status_protocol(text: str) -> bool:
+    required = ("STATUS: CONTINUE", "STATUS: DONE", "STATUS: BLOCKED")
+    return all(item in text for item in required)
+
+
+def file_contains_managed_block(text: str) -> bool:
+    return any(begin in text and end in text for begin, end in MANAGED_MARKERS)
+
+
+def auth_summary(auth_path: Path) -> tuple[str, str]:
+    try:
+        auth = load_json(auth_path)
+    except Exception as exc:
+        return FAIL, f"Could not parse {auth_path}: {exc}"
+
+    api_key = auth.get("OPENAI_API_KEY")
+    if isinstance(api_key, str) and api_key.strip():
+        return PASS, "API key auth is configured in ~/.codex/auth.json."
+
+    tokens = auth.get("tokens")
+    if isinstance(tokens, dict):
+        access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")
+        payload = decode_jwt_payload(access_token) if isinstance(access_token, str) else None
+        expiry = None
+        if isinstance(payload, dict) and isinstance(payload.get("exp"), int):
+            expiry = datetime.fromtimestamp(payload["exp"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        last_refresh = format_timestamp(auth.get("last_refresh"))
+        detail_bits = ["Saved Codex auth tokens are present."]
+        if last_refresh:
+            detail_bits.append(f"Last refresh: {last_refresh}.")
+        if expiry:
+            detail_bits.append(f"Access token expiry: {expiry}.")
+        elif refresh_token:
+            detail_bits.append("Refresh token is present.")
+        return PASS, " ".join(detail_bits)
+
+    return FAIL, "No usable API key or saved auth tokens found in ~/.codex/auth.json."
+
+
+def load_optional_home_config(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    loaded = load_toml(path)
+    return loaded if isinstance(loaded, dict) else None
+
+
+def resolve_runner_root_from_inputs(
+    runner_root_arg: str | None,
+    home_config_path: str,
+) -> tuple[Path | None, str, dict[str, Any] | None]:
+    home_config = load_optional_home_config(Path(home_config_path).expanduser())
+    dummy_args = argparse.Namespace(runner_root=runner_root_arg, home_config=home_config_path)
+    runner_root, source = detect_runner_root(dummy_args, home_config)
+    return runner_root, source, home_config
+
+
+def require_runner_root(runner_root_arg: str | None, home_config_path: str) -> Path:
+    runner_root, _source, _home_config = resolve_runner_root_from_inputs(runner_root_arg, home_config_path)
+    if runner_root is None:
+        raise SystemExit(
+            "Could not determine the runner root. Set CONTINUUM_RUNNER_ROOT, create ~/.config/continuum/config.toml, or pass --runner-root."
+        )
+    return runner_root.expanduser()
+
+
+def resolve_projects_config_path(config_arg: str | None, runner_root: Path) -> Path:
+    if config_arg:
+        return Path(config_arg).expanduser()
+    return runner_root / "projects.json"
+
+
+def require_existing_path(path: Path, label: str) -> Path:
+    if not path.exists():
+        raise SystemExit(f"{label} does not exist: {path}")
+    return path
+
+
+def slugify_project_name(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+    return slug or "project"
+
+
+def pid_is_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def read_pid(pid_path: Path) -> int | None:
+    if not pid_path.exists():
+        return None
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip()
+        return int(raw) if raw else None
+    except Exception:
+        return None
+
+
+def parse_dt(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def humanize_age(raw: str | None) -> str | None:
+    dt = parse_dt(raw)
+    if dt is None:
+        return None
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = max(0, int((now - dt.astimezone(timezone.utc)).total_seconds()))
+    if delta < 60:
+        return f"{delta}s ago"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
+
+def resolve_runtime_root(config_path: Path, payload: dict[str, Any]) -> Path:
+    runtime_root = Path(str(payload.get("supervisor_root", "./runtime"))).expanduser()
+    if not runtime_root.is_absolute():
+        runtime_root = (config_path.parent / runtime_root).resolve()
+    return runtime_root
+
+
+def invoke_subprocess(cmd: list[str]) -> int:
+    completed = subprocess.run(cmd, check=False)
+    return completed.returncode
+
+
+def require_runner_script(runner_root: Path, name: str) -> Path:
+    script_path = runner_root / name
+    if not script_path.exists():
+        raise SystemExit(
+            f"Runner script not found at {script_path}. Run `./continuum init` or repair the runner root first."
+        )
+    return script_path
+
+
+def sync_runner_scripts(runner_root: Path, force: bool) -> tuple[list[str], list[str]]:
+    source_root = Path(__file__).resolve().parent / "supervisor"
+    copied: list[str] = []
+    skipped: list[str] = []
+    runner_root.mkdir(parents=True, exist_ok=True)
+
+    for src in sorted(source_root.iterdir()):
+        if not src.is_file():
+            continue
+        if src.name == "projects.example.json":
+            dst = runner_root / "projects.json"
+            if dst.exists():
+                skipped.append(dst.name)
+                continue
+            payload = load_json(src)
+            if isinstance(payload, dict):
+                payload["projects"] = []
+                dst.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            else:
+                shutil.copy2(src, dst)
+            copied.append(dst.name)
+            continue
+
+        dst = runner_root / src.name
+        if dst.exists() and not force:
+            skipped.append(dst.name)
+            continue
+        shutil.copy2(src, dst)
+        dst.chmod(dst.stat().st_mode | 0o111)
+        copied.append(dst.name)
+
+    return copied, skipped
+
+
+def run_init(args: argparse.Namespace) -> int:
+    runner_root, _source, _home_config = resolve_runner_root_from_inputs(args.runner_root, args.home_config)
+    if runner_root is None:
+        runner_root = Path(args.home_runner_link).expanduser()
+    runner_root = runner_root.expanduser()
+
+    copied, skipped = sync_runner_scripts(runner_root, args.force)
+
+    install_cmd = [
+        sys.executable,
+        str(Path(__file__).resolve().parent / "scripts" / "install_home.py"),
+        "--runner-root",
+        str(runner_root),
+        "--kit-root",
+        str(Path(__file__).resolve().parent),
+        "--config-path",
+        args.home_config,
+        "--home-runner-link",
+        args.home_runner_link,
+    ]
+    if args.force:
+        install_cmd.append("--force")
+
+    rc = invoke_subprocess(install_cmd)
+    if rc != 0:
+        return rc
+
+    print()
+    print(f"Runner root: {runner_root}")
+    if copied:
+        print("Copied:", ", ".join(copied))
+    if skipped:
+        print("Skipped existing:", ", ".join(skipped))
+    return 0
+
+
+def run_enable(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = resolve_projects_config_path(args.config, runner_root)
+    script_path = runner_root / "enable_project.py"
+    if not script_path.exists():
+        script_path = Path(__file__).resolve().parent / "supervisor" / "enable_project.py"
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        args.project_path,
+        "--goal",
+        args.goal,
+        "--runner-root",
+        str(runner_root),
+        "--config",
+        str(config_path),
+    ]
+    if args.name:
+        cmd.extend(["--name", args.name])
+    if args.profile:
+        cmd.extend(["--profile", args.profile])
+    if args.progress_path:
+        cmd.extend(["--progress-path", args.progress_path])
+    for review in args.review:
+        cmd.extend(["--review", review])
+    return invoke_subprocess(cmd)
+
+
+def run_start(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = resolve_projects_config_path(args.config, runner_root)
+    script = require_runner_script(runner_root, "launch_project.sh")
+    return invoke_subprocess([str(script), args.project_name, str(config_path)])
+
+
+def run_stop(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    script = require_runner_script(runner_root, "stop_project.sh")
+    return invoke_subprocess([str(script), args.project_name])
+
+
+def run_restart(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = resolve_projects_config_path(args.config, runner_root)
+    script = require_runner_script(runner_root, "restart_project.sh")
+    return invoke_subprocess([str(script), args.project_name, str(config_path)])
+
+
+def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
+    payload = load_json(config_path)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"projects.json must contain an object at top level: {config_path}")
+
+    projects = payload.get("projects", [])
+    if not isinstance(projects, list):
+        raise SystemExit(f"'projects' must be a list in {config_path}")
+
+    runtime_root = resolve_runtime_root(config_path, payload)
+    rows: list[dict[str, Any]] = []
+
+    for item in projects:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "<unnamed>"))
+        slug = slugify_project_name(name)
+        project_root = runtime_root / slug
+        state_path = project_root / "state" / "status.json"
+        message_path = project_root / "state" / "last_message.md"
+        log_path = project_root / "logs" / "codex.log"
+        pid_path = config_path.parent / f"supervisor.{slug}.pid"
+        restart_state_path = config_path.parent / f"restart.{slug}.json"
+
+        state = load_json(state_path) if state_path.exists() else {}
+        restart_state = load_json(restart_state_path) if restart_state_path.exists() else {}
+        supervisor_pid = read_pid(pid_path)
+        running = pid_is_alive(supervisor_pid)
+
+        last_status = state.get("last_status")
+        phase = state.get("phase")
+        pass_num = state.get("pass_num")
+        updated_at = state.get("updated_at")
+        activity_at = None
+        if log_path.exists():
+            activity_at = datetime.fromtimestamp(log_path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+        progress_path = Path(str(item.get("path", ""))).expanduser() / "docs" / "codex-progress.md"
+        progress_at = None
+        if progress_path.exists():
+            progress_at = datetime.fromtimestamp(progress_path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+        restart_phase = None
+        restart_detail = None
+        if isinstance(restart_state, dict):
+            restart_phase = restart_state.get("phase")
+            restart_detail = restart_state.get("detail")
+
+        if restart_phase:
+            overall = f"restart:{restart_phase}"
+        elif running:
+            overall = "running"
+        elif last_status == "DONE":
+            overall = "done"
+        elif last_status == "BLOCKED":
+            overall = "blocked"
+        elif last_status == "FAILED":
+            overall = "failed"
+        elif last_status == "RATE_LIMIT_WAIT":
+            overall = "waiting"
+        elif item.get("enabled", True) is False:
+            overall = "disabled"
+        elif state:
+            overall = "idle"
+        else:
+            overall = "not-started"
+
+        row = {
+            "name": name,
+            "enabled": bool(item.get("enabled", True)),
+            "path": item.get("path"),
+            "profile": item.get("profile") or payload.get("default_profile"),
+            "overall_status": overall,
+            "last_status": last_status,
+            "phase": phase,
+            "pass_num": pass_num,
+            "updated_at": updated_at,
+            "updated_age": humanize_age(updated_at),
+            "activity_at": activity_at,
+            "activity_age": humanize_age(activity_at),
+            "progress_at": progress_at,
+            "progress_age": humanize_age(progress_at),
+            "supervisor_pid": supervisor_pid,
+            "supervisor_running": running,
+            "state_path": str(state_path),
+            "message_path": str(message_path),
+            "log_path": str(log_path),
+            "restart_phase": restart_phase,
+            "restart_detail": restart_detail,
+        }
+        rows.append(row)
+
+    return rows
+
+
+def run_status(args: argparse.Namespace) -> int:
+    runner_root = require_runner_root(args.runner_root, args.home_config)
+    config_path = require_existing_path(resolve_projects_config_path(args.config, runner_root), "Config file")
+    rows = collect_status_rows(config_path)
+
+    if args.project_name:
+        rows = [row for row in rows if row["name"] == args.project_name]
+        if not rows:
+            raise SystemExit(f"Project not found in {config_path}: {args.project_name}")
+
+    if args.json:
+        print(json.dumps({"config": str(config_path), "projects": rows}, indent=2))
+        return 0
+
+    print("Continuum status")
+    print()
+    print(f"Runner: {runner_root}")
+    print(f"Config: {config_path}")
+    print()
+    if not rows:
+        print("No projects configured.")
+        return 0
+
+    for row in rows:
+        print(f"{row['name']} [{row['overall_status']}]")
+        print(f"  Repo: {row['path']}")
+        if row.get("profile"):
+            print(f"  Profile: {row['profile']}")
+        if row.get("pass_num") is not None:
+            phase = f" ({row['phase']})" if row.get("phase") else ""
+            print(f"  Pass: {row['pass_num']}{phase}")
+        if row.get("last_status"):
+            print(f"  Last status: {row['last_status']}")
+        if row.get("updated_at"):
+            suffix = f" ({row['updated_age']})" if row.get("updated_age") else ""
+            print(f"  Updated: {format_timestamp(row['updated_at'])}{suffix}")
+        if row.get("activity_at"):
+            suffix = f" ({row['activity_age']})" if row.get("activity_age") else ""
+            print(f"  Last log activity: {format_timestamp(row['activity_at'])}{suffix}")
+        if row.get("progress_at"):
+            suffix = f" ({row['progress_age']})" if row.get("progress_age") else ""
+            print(f"  Last progress checkpoint: {format_timestamp(row['progress_at'])}{suffix}")
+        if row.get("supervisor_pid"):
+            state = "alive" if row.get("supervisor_running") else "stale"
+            print(f"  Supervisor PID: {row['supervisor_pid']} ({state})")
+        if row.get("restart_phase"):
+            detail = f": {row['restart_detail']}" if row.get("restart_detail") else ""
+            print(f"  Restart: {row['restart_phase']}{detail}")
+        print()
+    return 0
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    results: list[CheckResult] = []
+
+    codex_home = Path(args.codex_home).expanduser()
+    home_config_path = Path(args.home_config).expanduser()
+
+    ok, message = check_command("codex")
+    add_result(results, PASS if ok else FAIL, "codex_cli", message)
+
+    ok, message = check_command("git")
+    add_result(results, PASS if ok else FAIL, "git_cli", message)
+
+    home_config = None
+    if home_config_path.exists():
+        try:
+            home_config = load_toml(home_config_path)
+            add_result(results, PASS, "home_config", f"Continuum home config found at {home_config_path}.")
+        except Exception as exc:
+            add_result(results, FAIL, "home_config", f"Could not parse {home_config_path}: {exc}")
+    else:
+        add_result(results, WARN, "home_config", f"Continuum home config not found at {home_config_path}.")
+
+    runner_root, runner_source = detect_runner_root(args, home_config if isinstance(home_config, dict) else None)
+    if runner_root is None:
+        add_result(results, FAIL, "runner_root", "Could not determine the runner root. Set CONTINUUM_RUNNER_ROOT, create ~/.config/continuum/config.toml, or pass --runner-root.")
+    else:
+        resolved = runner_root.resolve(strict=False)
+        if runner_root.exists() or runner_root.is_symlink():
+            add_result(results, PASS, "runner_root", f"Runner root resolved from {runner_source}: {runner_root} -> {resolved}")
+        else:
+            add_result(results, FAIL, "runner_root", f"Runner root resolved from {runner_source}, but the path does not exist: {runner_root}")
+
+    codex_config_path = codex_home / "config.toml"
+    codex_config: dict[str, Any] | None = None
+    if codex_config_path.exists():
+        try:
+            codex_config = load_toml(codex_config_path)
+            add_result(results, PASS, "codex_config", f"Codex config found at {codex_config_path}.")
+        except Exception as exc:
+            add_result(results, FAIL, "codex_config", f"Could not parse {codex_config_path}: {exc}")
+    else:
+        add_result(results, FAIL, "codex_config", f"Missing Codex config at {codex_config_path}.")
+
+    global_agents = codex_home / "AGENTS.md"
+    if global_agents.exists():
+        agents_text = global_agents.read_text(encoding="utf-8", errors="replace")
+        if file_contains_status_protocol(agents_text):
+            add_result(results, WARN, "global_agents", "Global ~/.codex/AGENTS.md contains the STATUS protocol. Keep that protocol repo-local unless you want it in every interactive session.")
+        else:
+            add_result(results, PASS, "global_agents", f"Global AGENTS file found at {global_agents}.")
+    else:
+        add_result(results, WARN, "global_agents", f"Global AGENTS file not found at {global_agents}.")
+
+    auth_path = codex_home / "auth.json"
+    if auth_path.exists():
+        status, message = auth_summary(auth_path)
+        add_result(results, status, "codex_auth", message)
+    else:
+        add_result(results, FAIL, "codex_auth", f"Missing Codex auth file at {auth_path}.")
+
+    hooks_path = codex_home / "hooks.json"
+    if hooks_path.exists():
+        hooks_text = hooks_path.read_text(encoding="utf-8", errors="replace")
+        if "auto_continue.py" in hooks_text:
+            add_result(results, WARN, "hooks", "Interactive Stop hook references auto_continue.py. The supervisor path does not need it, and it can add noise to normal interactive sessions.")
+        else:
+            add_result(results, PASS, "hooks", f"Hooks file found at {hooks_path}.")
+    else:
+        add_result(results, PASS, "hooks", "No global hooks.json file detected.")
+
+    if codex_config:
+        autonomous = lookup_path(codex_config, "profiles", "autonomous") or {}
+        autonomous_network = lookup_path(codex_config, "profiles", "autonomous", "sandbox_workspace_write", "network_access")
+        if (
+            isinstance(autonomous, dict)
+            and autonomous.get("approval_policy") == "never"
+            and autonomous.get("sandbox_mode") == "workspace-write"
+            and autonomous_network is False
+        ):
+            add_result(results, PASS, "autonomous_profile", "Autonomous profile is configured for unattended workspace-write runs.")
+        else:
+            add_result(results, WARN, "autonomous_profile", "Autonomous profile is missing or does not match the expected unattended settings (`approval_policy = never`, `sandbox_mode = workspace-write`, `network_access = false`).")
+
+        autonomous_fast = lookup_path(codex_config, "profiles", "autonomous_fast") or {}
+        autonomous_fast_network = lookup_path(codex_config, "profiles", "autonomous_fast", "sandbox_workspace_write", "network_access")
+        if (
+            isinstance(autonomous_fast, dict)
+            and autonomous_fast.get("approval_policy") == "never"
+            and autonomous_fast.get("sandbox_mode") == "workspace-write"
+            and autonomous_fast_network is False
+        ):
+            add_result(results, PASS, "autonomous_fast_profile", "Autonomous fast profile is configured.")
+        else:
+            add_result(results, WARN, "autonomous_fast_profile", "Autonomous fast profile is missing or does not match the expected unattended settings.")
+
+    rules_path = codex_home / "rules" / "default.rules"
+    if rules_path.exists():
+        rules_text = rules_path.read_text(encoding="utf-8", errors="replace")
+        missing_rules = [command for command in ("add", "commit", "push") if not has_git_rule(rules_text, command)]
+        if missing_rules:
+            add_result(results, WARN, "git_rules", f"Git allow-rules are missing for: {', '.join(missing_rules)}.")
+        else:
+            add_result(results, PASS, "git_rules", "Git allow-rules exist for add, commit, and push.")
+    else:
+        add_result(results, WARN, "git_rules", f"Git rules file not found at {rules_path}.")
+
+    if runner_root and (runner_root.exists() or runner_root.is_symlink()):
+        required_files = [
+            "codex_supervisor.py",
+            "enable_project.py",
+            "launch_project.sh",
+            "restart_project.sh",
+            "stop_project.sh",
+            "projects.json",
+        ]
+        missing = [name for name in required_files if not (runner_root / name).exists()]
+        if missing:
+            add_result(results, FAIL, "runner_files", f"Runner root is missing required files: {', '.join(missing)}.")
+        else:
+            add_result(results, PASS, "runner_files", "Runner root contains the expected supervisor files and projects.json.")
+
+        projects_json_path = runner_root / "projects.json"
+        projects_payload: dict[str, Any] | None = None
+        if projects_json_path.exists():
+            try:
+                projects_payload = load_json(projects_json_path)
+                projects = projects_payload.get("projects", [])
+                if not isinstance(projects, list):
+                    raise ValueError("'projects' must be a list")
+                enabled_count = sum(1 for item in projects if isinstance(item, dict) and item.get("enabled", True))
+                add_result(results, PASS, "projects_json", f"projects.json parsed successfully ({len(projects)} projects, {enabled_count} enabled).")
+            except Exception as exc:
+                add_result(results, FAIL, "projects_json", f"Could not parse {projects_json_path}: {exc}")
+                projects_payload = None
+        else:
+            add_result(results, FAIL, "projects_json", f"Missing projects.json at {projects_json_path}.")
+            projects_payload = None
+
+        if isinstance(projects_payload, dict):
+            configured_projects = projects_payload.get("projects", [])
+            if not configured_projects:
+                add_result(results, WARN, "projects", "No projects are configured in projects.json yet.")
+            project_trust = lookup_path(codex_config or {}, "projects") if codex_config else {}
+
+            for item in configured_projects:
+                if not isinstance(item, dict):
+                    add_result(results, FAIL, "project_entry", "projects.json contains a non-object project entry.")
+                    continue
+
+                name = str(item.get("name", "<unnamed>"))
+                project_path_raw = item.get("path")
+                if not isinstance(project_path_raw, str) or not project_path_raw.strip():
+                    add_result(results, FAIL, f"project:{name}", f"{name}: missing project path.")
+                    continue
+
+                project_path = Path(project_path_raw).expanduser()
+                if project_path.exists():
+                    add_result(results, PASS, f"project:{name}:path", f"{name}: project path exists at {project_path}.")
+                else:
+                    add_result(results, FAIL, f"project:{name}:path", f"{name}: project path does not exist: {project_path}.")
+                    continue
+
+                if check_git_repo(project_path):
+                    add_result(results, PASS, f"project:{name}:git", f"{name}: project path is a git repo.")
+                else:
+                    add_result(results, FAIL, f"project:{name}:git", f"{name}: project path is not a valid git repo.")
+
+                agents_path = project_path / "AGENTS.md"
+                if agents_path.exists():
+                    text = agents_path.read_text(encoding="utf-8", errors="replace")
+                    if file_contains_status_protocol(text):
+                        if file_contains_managed_block(text):
+                            add_result(results, PASS, f"project:{name}:agents", f"{name}: AGENTS.md contains a managed autonomous block and the STATUS protocol.")
+                        else:
+                            add_result(results, PASS, f"project:{name}:agents", f"{name}: AGENTS.md contains the STATUS protocol.")
+                    else:
+                        add_result(results, FAIL, f"project:{name}:agents", f"{name}: AGENTS.md exists but does not contain the required STATUS protocol.")
+                else:
+                    add_result(results, FAIL, f"project:{name}:agents", f"{name}: missing repo AGENTS.md.")
+
+                progress_path = project_path / "docs" / "codex-progress.md"
+                if progress_path.exists():
+                    add_result(results, PASS, f"project:{name}:progress", f"{name}: progress log found at {progress_path}.")
+                else:
+                    add_result(results, WARN, f"project:{name}:progress", f"{name}: default progress log not found at {progress_path}.")
+
+                trust_level = None
+                if isinstance(project_trust, dict):
+                    trust_level = lookup_path(project_trust, str(project_path), "trust_level")
+                    if trust_level is None:
+                        trust_level = lookup_path(project_trust, str(project_path.resolve()), "trust_level")
+                if trust_level == "trusted":
+                    add_result(results, PASS, f"project:{name}:trust", f"{name}: repo is marked trusted in ~/.codex/config.toml.")
+                else:
+                    add_result(results, WARN, f"project:{name}:trust", f"{name}: repo is not marked trusted in ~/.codex/config.toml. Project-scoped .codex settings may be ignored.")
+
+    pass_count = sum(1 for item in results if item.status == PASS)
+    warn_count = sum(1 for item in results if item.status == WARN)
+    fail_count = sum(1 for item in results if item.status == FAIL)
+
+    if args.json:
+        payload = {
+            "summary": {"pass": pass_count, "warn": warn_count, "fail": fail_count},
+            "results": [item.__dict__ for item in results],
+        }
+        print(json.dumps(payload, indent=2))
+    else:
+        print("Continuum doctor")
+        print()
+        for item in results:
+            print(f"[{item.status}] {item.message}")
+        print()
+        print(f"Summary: {pass_count} pass, {warn_count} warn, {fail_count} fail")
+
+    return 1 if fail_count else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="continuum", description="Continuum for Codex command line tools.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    init = subparsers.add_parser("init", help="Create or refresh a local Continuum runner and home config.")
+    init.add_argument("--runner-root", help="Runner directory to create or refresh. Defaults to the configured or home runner path.")
+    init.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    init.add_argument("--home-runner-link", default=DEFAULT_HOME_RUNNER, help="Home-level runner path or symlink.")
+    init.add_argument("--force", action="store_true", help="Overwrite copied runner scripts and refresh home config if it differs.")
+
+    enable = subparsers.add_parser("enable", help="Enable a repo for autonomous Continuum runs.")
+    enable.add_argument("project_path", help="Absolute or relative path to the target git repo.")
+    enable.add_argument("--goal", required=True, help="Long-term project goal.")
+    enable.add_argument("--name", help="Project name for logs and status output.")
+    enable.add_argument("--profile", default="autonomous", help="Runner profile name.")
+    enable.add_argument("--review", action="append", default=[], metavar="PATH", help="Repo-relative doc to review before choosing the next task. Repeatable.")
+    enable.add_argument("--progress-path", default="docs/codex-progress.md", help="Repo-relative progress log path.")
+    enable.add_argument("--runner-root", help="Runner root to use.")
+    enable.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    enable.add_argument("--config", help="Explicit path to projects.json.")
+
+    start = subparsers.add_parser("start", help="Launch one enabled project.")
+    start.add_argument("project_name", help="Project name from projects.json.")
+    start.add_argument("--runner-root", help="Runner root to use.")
+    start.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    start.add_argument("--config", help="Explicit path to projects.json.")
+
+    stop = subparsers.add_parser("stop", help="Request a clean stop for one project.")
+    stop.add_argument("project_name", help="Project name from projects.json.")
+    stop.add_argument("--runner-root", help="Runner root to use.")
+    stop.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+
+    restart = subparsers.add_parser("restart", help="Request a clean restart for one project.")
+    restart.add_argument("project_name", help="Project name from projects.json.")
+    restart.add_argument("--runner-root", help="Runner root to use.")
+    restart.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    restart.add_argument("--config", help="Explicit path to projects.json.")
+
+    status = subparsers.add_parser("status", help="Show project status from the runner state files.")
+    status.add_argument("project_name", nargs="?", help="Optional single project name to inspect.")
+    status.add_argument("--runner-root", help="Runner root to use.")
+    status.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    status.add_argument("--config", help="Explicit path to projects.json.")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    doctor = subparsers.add_parser("doctor", help="Validate a local Continuum and Codex setup.")
+    doctor.add_argument("--runner-root", help="Explicit runner root to inspect.")
+    doctor.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
+    doctor.add_argument("--codex-home", default=CODEX_HOME_DEFAULT, help="Path to the Codex home directory.")
+    doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of human-readable text.")
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "init":
+        return run_init(args)
+    if args.command == "enable":
+        return run_enable(args)
+    if args.command == "start":
+        return run_start(args)
+    if args.command == "stop":
+        return run_stop(args)
+    if args.command == "restart":
+        return run_restart(args)
+    if args.command == "status":
+        return run_status(args)
+    if args.command == "doctor":
+        return run_doctor(args)
+
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

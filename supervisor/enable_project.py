@@ -329,6 +329,8 @@ def main() -> int:
     print(f"Progress log: {progress_path}")
     print("")
     print("Next step:")
+    print(f"  continuum start {project_name}")
+    print("  or")
     print(f"  cd {runner_root}")
     print(f"  ./launch_project.sh {project_name}")
     return 0

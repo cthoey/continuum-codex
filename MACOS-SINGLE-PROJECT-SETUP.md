@@ -98,21 +98,10 @@ That means unattended runs do not pause for approval. If a tool install or netwo
 
 ## 4. Create the runner
 
-Create a runner directory and copy the supervisor files into it:
+Use the CLI to create or refresh the runner and install the home-level config:
 
 ```bash
-mkdir -p ~/continuum-runner
-cp "$KIT_ROOT"/supervisor/*.py "$KIT_ROOT"/supervisor/*.sh ~/continuum-runner/
-cp "$KIT_ROOT"/supervisor/projects.example.json ~/continuum-runner/projects.json
-chmod +x ~/continuum-runner/*.py ~/continuum-runner/*.sh
-```
-
-Install the home-level config and runner alias:
-
-```bash
-python3 "$KIT_ROOT/scripts/install_home.py" \
-  --runner-root ~/continuum-runner \
-  --kit-root "$KIT_ROOT"
+"$KIT_ROOT/continuum" init --runner-root ~/continuum-runner
 ```
 
 That creates:
@@ -122,13 +111,18 @@ That creates:
 
 If you already have a live runner elsewhere, pass that path to `--runner-root` instead.
 
-## 5. Enable the project
-
-Use the helper instead of hand-editing `projects.json`, repo `AGENTS.md`, and `docs/codex-progress.md`:
+Run the built-in setup check:
 
 ```bash
-cd ~/continuum-runner
-./enable_project.py "$PROJECT_PATH" \
+"$KIT_ROOT/continuum" doctor
+```
+
+## 5. Enable the project
+
+Use the CLI instead of hand-editing `projects.json`, repo `AGENTS.md`, and `docs/codex-progress.md`:
+
+```bash
+"$KIT_ROOT/continuum" enable "$PROJECT_PATH" \
   --name "$PROJECT_NAME" \
   --goal "The goal of this project is to ..."
 ```
@@ -146,8 +140,7 @@ It also auto-detects common planning docs such as `README.md`, `docs/ROADMAP.md`
 Launch the project:
 
 ```bash
-cd ~/continuum-runner
-./launch_project.sh "$PROJECT_NAME"
+"$KIT_ROOT/continuum" start "$PROJECT_NAME"
 ```
 
 Tail the worker log:
@@ -159,8 +152,7 @@ tail -f ~/continuum-runner/runtime/"$PROJECT_NAME"/logs/codex.log
 Inspect saved state:
 
 ```bash
-cat ~/continuum-runner/runtime/"$PROJECT_NAME"/state/status.json
-cat ~/continuum-runner/runtime/"$PROJECT_NAME"/state/last_message.md
+"$KIT_ROOT/continuum" status "$PROJECT_NAME"
 ```
 
 What to expect:
@@ -177,15 +169,13 @@ If you prefer SwiftBar, this is the point where it becomes useful. Project provi
 Graceful restart:
 
 ```bash
-cd ~/continuum-runner
-./restart_project.sh "$PROJECT_NAME"
+"$KIT_ROOT/continuum" restart "$PROJECT_NAME"
 ```
 
 Graceful stop:
 
 ```bash
-cd ~/continuum-runner
-./stop_project.sh "$PROJECT_NAME"
+"$KIT_ROOT/continuum" stop "$PROJECT_NAME"
 ```
 
 `restart_project.sh` and `stop_project.sh` do not force-kill the active `codex exec` pass. They wait for a clean boundary.

@@ -24,9 +24,9 @@ Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 ## How it works
 
 1. Put reusable Codex profiles in `~/.codex/config.toml`.
-2. Create a runner directory that contains the supervisor scripts and `projects.json`.
-3. Run `enable_project.py` with a repo path and a long-term project goal.
-4. Launch that project with `launch_project.sh <name>`.
+2. Run `continuum init` to create or refresh the runner and home config.
+3. Run `continuum enable` with a repo path and a long-term project goal.
+4. Launch that project with `continuum start <name>`.
 5. Continuum keeps resuming the same Codex thread until the model ends with `STATUS: DONE` or `STATUS: BLOCKED: ...`.
 
 Only repos you explicitly enable become autonomous.
@@ -42,13 +42,9 @@ cd continuum-codex
 brew install codex
 codex login
 
-mkdir -p ~/.codex ~/.codex/rules ~/continuum-runner
+mkdir -p ~/.codex ~/.codex/rules
 cp samples/config.toml.sample ~/.codex/config.toml
 cp samples/global-AGENTS.md.sample ~/.codex/AGENTS.md
-
-cp supervisor/*.py supervisor/*.sh ~/continuum-runner/
-cp supervisor/projects.example.json ~/continuum-runner/projects.json
-chmod +x ~/continuum-runner/*.py ~/continuum-runner/*.sh
 
 cat >> ~/.codex/rules/default.rules <<'EOF'
 prefix_rule(pattern=["git", "add"], decision="allow")
@@ -56,16 +52,15 @@ prefix_rule(pattern=["git", "commit"], decision="allow")
 prefix_rule(pattern=["git", "push"], decision="allow")
 EOF
 
-python3 scripts/install_home.py \
-  --runner-root ~/continuum-runner \
-  --kit-root "$PWD"
+./continuum init --runner-root ~/continuum-runner
+
+./continuum doctor
 ```
 
 Enable one repo:
 
 ```bash
-cd ~/continuum-runner
-./enable_project.py /absolute/path/to/project \
+./continuum enable /absolute/path/to/project \
   --name my-project \
   --goal "The goal of this project is to ..."
 ```
@@ -73,8 +68,7 @@ cd ~/continuum-runner
 Launch it:
 
 ```bash
-cd ~/continuum-runner
-./launch_project.sh my-project
+./continuum start my-project
 ```
 
 That is enough to start one autonomous project. For the full from-scratch walkthrough, see [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md).
@@ -84,22 +78,32 @@ That is enough to start one autonomous project. For the full from-scratch walkth
 Launch:
 
 ```bash
-cd ~/continuum-runner
-./launch_project.sh my-project
+./continuum start my-project
 ```
 
 Graceful restart:
 
 ```bash
-cd ~/continuum-runner
-./restart_project.sh my-project
+./continuum restart my-project
 ```
 
 Graceful stop:
 
 ```bash
-cd ~/continuum-runner
-./stop_project.sh my-project
+./continuum stop my-project
+```
+
+Check the overall install:
+
+```bash
+./continuum doctor
+```
+
+Inspect runner state:
+
+```bash
+./continuum status
+./continuum status my-project
 ```
 
 Tail the project log:
@@ -115,7 +119,7 @@ cat ~/continuum-runner/runtime/my-project/state/status.json
 cat ~/continuum-runner/runtime/my-project/state/last_message.md
 ```
 
-If you use SwiftBar, enable the project once with `enable_project.py` and then use the menu bar plugin to start, stop, and restart it.
+If you use SwiftBar, enable the project once with `continuum enable` and then use the menu bar plugin to start, stop, and restart it.
 
 ## Operational notes
 
@@ -132,6 +136,7 @@ If you use SwiftBar, enable the project once with `enable_project.py` and then u
 
 - [supervisor/](supervisor/): runner scripts, project enabler, example config
 - [samples/](samples/): sample Codex config, AGENTS files, optional hook files
+- [continuum](continuum): CLI entry point, starting with `continuum doctor`
 - [scripts/install_home.py](scripts/install_home.py): writes `~/.config/continuum/config.toml` and a `~/continuum-runner` alias
 - [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md): detailed setup guide
 - [RELEASE_NOTES_v0.1.0.md](RELEASE_NOTES_v0.1.0.md): first public release notes

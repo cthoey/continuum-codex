@@ -57,6 +57,12 @@ def render_config(home_runner_link: Path, kit_root: Path | None) -> str:
 
 def ensure_symlink(link_path: Path, target_path: Path, force: bool) -> None:
     if link_path.exists() or link_path.is_symlink():
+        if not link_path.is_symlink():
+            try:
+                if link_path.resolve() == target_path.resolve():
+                    return
+            except Exception:
+                pass
         if link_path.is_symlink() and link_path.resolve() == target_path.resolve():
             return
         if not force:

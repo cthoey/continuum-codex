@@ -12,6 +12,8 @@ the `0.x` phase while the install shape and operator workflow continue to evolve
 - rewrote the README around what Continuum is, when to use it, and how to operate it
 - simplified the macOS single-project setup guide
 - removed the standalone branding document and folded the minimal naming note into the main docs
+- added a `continuum doctor` command to validate local Continuum, Codex, runner, and project setup
+- expanded `continuum` into a CLI wrapper for init, enable, start, stop, restart, and status
 
 ## [0.1.0] - 2026-04-02
 
