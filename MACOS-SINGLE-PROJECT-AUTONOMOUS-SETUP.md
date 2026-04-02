@@ -1,6 +1,20 @@
-# macOS: Enable One Project for Autonomous Codex
+# Continuum for Codex: macOS Single-Project Setup
 
-This guide sets up Codex from scratch on macOS so that exactly one project runs autonomously.
+This guide sets up Continuum for Codex from scratch on macOS so that exactly one project runs
+autonomously.
+
+The examples below still use a `codex-runner` folder name for compatibility with existing installs.
+For a brand-new setup, `continuum-runner` is the cleaner long-term name.
+
+If you are standardizing a machine-level install, prefer a home config at
+`~/.config/continuum/config.toml` and a home runner alias such as `~/continuum-runner`.
+
+Use this setup for projects where the agent mostly needs continued execution rather than constant
+human steering. It is a good fit when you keep finding yourself sending the same "continue from the
+last checkpoint and keep going" prompt just to nudge Codex along.
+
+Do not use this setup for projects that still need frequent human decisions, prompt reframing, or
+close supervision after every small chunk.
 
 It keeps autonomy project-specific:
 
@@ -38,6 +52,7 @@ Set the project path once in your shell so you can reuse it in later commands:
 
 ```bash
 export PROJECT_PATH="/absolute/path/to/project"
+export PROJECT_NAME="$(basename "$PROJECT_PATH")"
 ```
 
 Quick sanity check:
@@ -53,6 +68,9 @@ true
 ```
 
 If that command fails, stop and fix the project path first.
+
+If you want a different label in logs and SwiftBar than the repo directory name, replace
+`$PROJECT_NAME` later by passing `--name "your-label"` to `enable_project.py`.
 
 ## 1.5 Define the project goal
 
@@ -185,60 +203,7 @@ Instead, create a neutral global file with shared safety defaults only:
 - Keep autonomous milestone commits focused and descriptive.
 ```
 
-## 6. Create a repo-local `AGENTS.md` in the target project
-
-This file is what makes this one project autonomous.
-
-Create:
-
-```bash
-$PROJECT_PATH/AGENTS.md
-```
-
-Use this starting template:
-
-```md
-# AGENTS.md
-
-## Project goal
-- The goal of this project is to <describe the overall long-term goal here>.
-- Keep that long-term goal in mind when choosing between plausible next tasks.
-
-## Autonomous execution protocol
-- Work autonomously unless you are truly blocked.
-- Maintain a running progress log inside the repo at `docs/codex-progress.md` unless the repo already has a better location.
-- After every meaningful chunk of work, update the progress log with findings, files touched, next steps, and open risks.
-- Choose the next highest-value task yourself when the current chunk is complete.
-- Prefer small, validated increments over speculative rewrites.
-- Only stop when the task is actually done or when real human input is required.
-- Feel free to install tools you need when the current environment, sandbox, and permissions allow it.
-- If installation is blocked, record the exact tool and blocking command in the progress log and continue with other useful work when possible.
-- For major validated milestones, stage the relevant files, create a focused git commit, and push it to the configured remote.
-- Record the commit SHA and push status in the progress log.
-
-## Completion status protocol
-End every final message with exactly one of these lines:
-- `STATUS: CONTINUE`
-- `STATUS: DONE`
-- `STATUS: BLOCKED: <specific reason>`
-
-## Validation
-- Run the most relevant available build, test, or lint commands after changes.
-- When there are no formal tests, use lightweight reproducible validation commands and record them.
-
-## Safety
-- Do not revert unrelated existing changes.
-- Do not create commits unless explicitly asked.
-```
-
-Notes:
-
-- The `Project goal` section is important. It tells the agent the long-term outcome for this repo.
-- The `STATUS:` section is required for the supervisor loop.
-- Keep this file in the project root.
-- Do not add this file to repos you do not want to run autonomously.
-
-## 7. Create a runner directory
+## 6. Create a runner directory
 
 Keep the runner outside the Downloads kit so the runtime state has a stable home.
 
@@ -247,17 +212,47 @@ Example:
 ```bash
 mkdir -p ~/codex-runner
 cp "$KIT_ROOT/supervisor/codex_supervisor.py" ~/codex-runner/
+cp "$KIT_ROOT/supervisor/enable_project.py" ~/codex-runner/
 cp "$KIT_ROOT/supervisor/launch_all.sh" ~/codex-runner/
 cp "$KIT_ROOT/supervisor/launch_project.sh" ~/codex-runner/
+cp "$KIT_ROOT/supervisor/restart_project.sh" ~/codex-runner/
 cp "$KIT_ROOT/supervisor/stop_project.sh" ~/codex-runner/
 cp "$KIT_ROOT/supervisor/notify.py" ~/codex-runner/
 cp "$KIT_ROOT/supervisor/projects.example.json" ~/codex-runner/projects.json
-chmod +x ~/codex-runner/codex_supervisor.py ~/codex-runner/launch_all.sh ~/codex-runner/launch_project.sh ~/codex-runner/stop_project.sh ~/codex-runner/notify.py
+chmod +x ~/codex-runner/codex_supervisor.py ~/codex-runner/enable_project.py ~/codex-runner/launch_all.sh ~/codex-runner/launch_project.sh ~/codex-runner/restart_project.sh ~/codex-runner/stop_project.sh ~/codex-runner/notify.py
 ```
 
-## 8. Edit `~/codex-runner/projects.json` for one project
+## 7. Enable the project with the helper
 
-Replace the example file with a single-project config like this:
+Use the helper instead of hand-editing `projects.json`, repo `AGENTS.md`, and
+`docs/codex-progress.md` yourself:
+
+```bash
+cd ~/codex-runner
+./enable_project.py "$PROJECT_PATH" \
+  --goal "The goal of this project is to <repeat the long-term project goal here>."
+```
+
+What the helper does:
+
+- adds or updates the project entry in `projects.json`
+- creates `docs/codex-progress.md` if it does not already exist
+- creates or updates a managed autonomous block inside the repo root `AGENTS.md`
+- auto-detects common review docs such as `README.md`, `docs/ROADMAP.md`, and
+  `docs/EXECUTION_PLAN.md`
+
+Useful optional flags:
+
+```bash
+./enable_project.py "$PROJECT_PATH" \
+  --goal "The goal of this project is to <repeat the long-term project goal here>." \
+  --name "$PROJECT_NAME" \
+  --profile autonomous_fast \
+  --review README.md \
+  --review docs/ROADMAP.md
+```
+
+If you want to see or hand-tune what it wrote, the resulting `projects.json` entry will look like:
 
 ```json
 {
@@ -272,7 +267,7 @@ Replace the example file with a single-project config like this:
     {
       "name": "single-project",
       "path": "/absolute/path/to/project",
-      "prompt": "Work autonomously on this project. The overall project goal is to <repeat the long-term project goal here>. Follow the repo AGENTS.md instructions, keep progress notes updated, choose the next highest-value task yourself, install useful tools when the current environment allows it, create git commits and pushes for major validated milestones, and continue until you are DONE or truly BLOCKED.",
+      "prompt": "Work autonomously on this project. The goal of this project is to <repeat the long-term project goal here>. Follow the repo AGENTS.md instructions, keep progress notes updated, choose the next highest-value task yourself, install useful tools when the current environment allows it, create git commits and pushes for major validated milestones, and continue until you are DONE or truly BLOCKED.",
       "profile": "autonomous",
       "max_passes": 0,
       "resume_existing": true,
@@ -283,16 +278,9 @@ Replace the example file with a single-project config like this:
 }
 ```
 
-Now replace the placeholder path with your real path:
-
-```bash
-perl -0pi -e 's|/absolute/path/to/project|'"$PROJECT_PATH"'|g' ~/codex-runner/projects.json
-```
-
 Optional adjustments:
 
-- Change `"name"` to the repo name you want in logs.
-- Replace the goal text in `"prompt"` with the real long-term goal for this project.
+- Change `"name"` if you want a different project label in logs and SwiftBar.
 - Use `"profile": "autonomous_fast"` if you want a cheaper/faster background run.
 - Leave `"notify": false` for the simplest initial setup.
 - Tune `"rate_limit_retry_seconds"` and `"max_rate_limit_retries"` if you want different retry behavior for temporary rate limits.
@@ -302,44 +290,57 @@ Important:
 - Only projects listed here will run under the supervisor.
 - This is the main project-specific switch for unattended execution.
 
-## 9. Start one autonomous project
+Notes:
+
+- The long-term project goal is important. Do not rely on Codex to infer it from the repo name.
+- The helper writes the `STATUS:` continuation protocol into the repo-local managed `AGENTS.md`
+  block because that protocol is required for the supervisor loop.
+- The helper is the preferred path for opting more repos into autonomy later.
+- SwiftBar is the preferred control surface for already-enabled projects, but project provisioning
+  stays script-based because it needs explicit inputs such as the repo path and project goal.
+
+## 8. Start one autonomous project
 
 Launch the selected project by name:
 
 ```bash
 cd ~/codex-runner
-./launch_project.sh single-project ./projects.json
+./launch_project.sh "$PROJECT_NAME" ./projects.json
 ```
 
 This starts one background supervisor process for that project only.
 
+On macOS, this also starts a matching `caffeinate -is -w <supervisor-pid>` watcher so the machine
+stays awake while that supervisor is active. This is intentional. It will prevent idle system sleep
+while the project is running. The display can still sleep, and lid-close sleep still wins.
+
 If you want multiple simultaneous projects later, launch each one separately with its own
 `./launch_project.sh <project-name> ./projects.json` command.
 
-## 10. Watch logs and state
+## 9. Watch logs and state
 
 Tail the supervisor log:
 
 ```bash
-tail -f ~/codex-runner/supervisor.single-project.out.log
+tail -f ~/codex-runner/supervisor."$PROJECT_NAME".out.log
 ```
 
 Tail the project Codex log:
 
 ```bash
-tail -f ~/codex-runner/runtime/single-project/logs/codex.log
+tail -f ~/codex-runner/runtime/"$PROJECT_NAME"/logs/codex.log
 ```
 
 Inspect the latest saved final message:
 
 ```bash
-cat ~/codex-runner/runtime/single-project/state/last_message.md
+cat ~/codex-runner/runtime/"$PROJECT_NAME"/state/last_message.md
 ```
 
 Inspect the current state:
 
 ```bash
-cat ~/codex-runner/runtime/single-project/state/status.json
+cat ~/codex-runner/runtime/"$PROJECT_NAME"/state/status.json
 ```
 
 What to expect:
@@ -350,17 +351,39 @@ What to expect:
 - If it ends with `STATUS: DONE` or `STATUS: BLOCKED: ...`, the loop stops.
 - If Codex hits a temporary rate limit or transient overload, the supervisor waits and retries automatically.
 - If Codex hits a hard quota or credits exhaustion condition, the supervisor stops and records a blocked state.
+- The quota handling is reactive:
+  the runner does not know your remaining credits ahead of time and only reacts when the Codex CLI
+  reports a quota or rate-limit error.
+- After you restore credits or limits, start or restart the project again so it can continue.
 
-## 11. Stop the project runner cleanly
+## 10. Stop the project runner cleanly
 
 When you want to stop that project's background supervisor:
 
 ```bash
 cd ~/codex-runner
-./stop_project.sh single-project
+./stop_project.sh "$PROJECT_NAME"
 ```
 
-## 12. Optional: keep the Stop hook for interactive Codex use
+`stop_project.sh` requests a graceful stop. It does not force-kill the active `codex exec` pass.
+
+## 10.5 Restart the project runner cleanly
+
+If you want to restart the project under the current runner configuration, use:
+
+```bash
+cd ~/codex-runner
+./restart_project.sh "$PROJECT_NAME" ./projects.json
+```
+
+This sends `TERM`, waits for the current pass to finish and the supervisor to exit, then launches
+the project again. On macOS, the relaunched project also gets the automatic `caffeinate` watcher.
+The restart path is request-based: while the current pass is finishing, the runner writes a small
+`restart.<project>.json` marker that status tools can read to show that a clean restart is pending.
+The default graceful-restart wait is 7200 seconds (2 hours). Override it with
+`CODEX_RESTART_WAIT_TIMEOUT_SECONDS` if you need a shorter or longer threshold.
+
+## 11. Optional: keep the Stop hook for interactive Codex use
 
 The supervisor path above does not require hooks.
 
@@ -375,7 +398,7 @@ chmod +x ~/.codex/hooks/auto_continue.py
 
 This is optional. It affects interactive Codex sessions, not the supervisor loop.
 
-## 13. How to keep other projects non-autonomous
+## 12. How to keep other projects non-autonomous
 
 If you want autonomy only for this one project:
 
@@ -385,7 +408,7 @@ If you want autonomy only for this one project:
 
 That keeps other repos in normal interactive mode.
 
-## 14. First-run checklist
+## 13. First-run checklist
 
 Before you trust the setup, confirm all of these:
 
@@ -393,22 +416,22 @@ Before you trust the setup, confirm all of these:
 2. `codex login` completed successfully.
 3. `~/.codex/config.toml` exists and includes the `autonomous` profile.
 4. `~/.codex/AGENTS.md` exists and does not contain the global `STATUS:` protocol.
-5. `$PROJECT_PATH/AGENTS.md` exists and does contain the exact `STATUS:` protocol.
+5. `$PROJECT_PATH/AGENTS.md` exists and does contain the managed autonomous block with the exact `STATUS:` protocol.
 6. `~/codex-runner/projects.json` contains exactly one enabled project.
 7. The `path` field in `projects.json` matches `$PROJECT_PATH`.
-8. `./launch_all.sh ./projects.json` starts successfully.
-9. `runtime/single-project/state/status.json` appears after the first run.
+8. `./launch_project.sh "$PROJECT_NAME" ./projects.json` starts successfully.
+9. `runtime/$PROJECT_NAME/state/status.json` appears after the first run.
 
-## 15. If the project does not continue automatically
+## 14. If the project does not continue automatically
 
 Check these in order:
 
 1. Open `$PROJECT_PATH/AGENTS.md` and confirm the exact `STATUS:` lines are present.
-2. Open `~/codex-runner/runtime/single-project/state/last_message.md` and confirm the last line is one of:
+2. Open `~/codex-runner/runtime/$PROJECT_NAME/state/last_message.md` and confirm the last line is one of:
    - `STATUS: CONTINUE`
    - `STATUS: DONE`
    - `STATUS: BLOCKED: <reason>`
-3. Open `~/codex-runner/runtime/single-project/logs/codex.log` and inspect the last pass.
+3. Open `~/codex-runner/runtime/$PROJECT_NAME/logs/codex.log` and inspect the last pass.
 4. Confirm `resume_existing` is `true` in `projects.json`.
 5. Confirm the project path in `projects.json` is the same working directory you expect.
 
@@ -419,4 +442,24 @@ After this setup:
 - Codex has reusable unattended profiles.
 - Only the one project you selected is configured for autonomous continuation.
 - The supervisor will keep resuming that one project until the model reports `DONE` or `BLOCKED`.
+- You can manage the project from scripts with `launch_project.sh`, `restart_project.sh`, and
+  `stop_project.sh`.
+- On macOS, the launched project keeps the machine awake automatically through `caffeinate` while
+  the supervisor is active.
 - Other repos remain normal unless you explicitly opt them in later.
+
+## Adding Another Project Later
+
+Once the base runner and global Codex setup already exist, you do not need to repeat this guide by
+hand for every new repo.
+
+Use the helper:
+
+```bash
+cd ~/codex-runner
+./enable_project.py /absolute/path/to/another-project \
+  --goal "The goal of this project is to ..."
+```
+
+That helper updates `projects.json`, creates `docs/codex-progress.md` if needed, and inserts or
+updates the managed autonomous block in the repo's `AGENTS.md`.

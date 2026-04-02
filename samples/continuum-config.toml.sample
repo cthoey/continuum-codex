@@ -1,0 +1,8 @@
+# Continuum user config
+
+# Home-level path to the live runner that owns projects.json, runtime state, logs, and pidfiles.
+runner_root = "~/continuum-runner"
+
+# Optional: uncomment and customize later if you want Continuum-aware tools to know where the
+# source repo lives on this machine.
+# kit_root = "/absolute/path/to/continuum-codex"

@@ -22,6 +22,9 @@ fi
 CONFIG="${2:-$HERE/projects.json}"
 SLUG="$(printf '%s' "$PROJECT_NAME" | LC_ALL=C tr -cs 'A-Za-z0-9._-' '_' | sed 's/^_//; s/_$//')"
 PIDFILE="$HERE/supervisor.${SLUG}.pid"
+CAFFEINATE_PIDFILE="$HERE/caffeinate.${SLUG}.pid"
+RESTART_PIDFILE="$HERE/restart.${SLUG}.pid"
+RESTART_STATEFILE="$HERE/restart.${SLUG}.json"
 LOGFILE="$HERE/supervisor.${SLUG}.out.log"
 
 if [[ ! -f "$CONFIG" ]]; then
@@ -38,7 +41,38 @@ if [[ -f "$PIDFILE" ]]; then
   rm -f "$PIDFILE"
 fi
 
+if [[ -f "$CAFFEINATE_PIDFILE" ]]; then
+  OLD_CAFFEINATE_PID="$(cat "$CAFFEINATE_PIDFILE" 2>/dev/null || true)"
+  if [[ -n "$OLD_CAFFEINATE_PID" ]] && kill -0 "$OLD_CAFFEINATE_PID" 2>/dev/null; then
+    kill "$OLD_CAFFEINATE_PID" 2>/dev/null || true
+  fi
+  rm -f "$CAFFEINATE_PIDFILE"
+fi
+
+if [[ -f "$RESTART_PIDFILE" ]]; then
+  OLD_RESTART_PID="$(cat "$RESTART_PIDFILE" 2>/dev/null || true)"
+  if [[ -n "$OLD_RESTART_PID" ]] && kill -0 "$OLD_RESTART_PID" 2>/dev/null; then
+    echo "Project restart already pending for '$PROJECT_NAME' with PID $OLD_RESTART_PID" >&2
+    exit 1
+  fi
+  rm -f "$RESTART_PIDFILE"
+fi
+
+if [[ -f "$RESTART_STATEFILE" ]]; then
+  rm -f "$RESTART_STATEFILE"
+fi
+
 nohup python3 "$HERE/codex_supervisor.py" "$CONFIG" "$PROJECT_NAME" >> "$LOGFILE" 2>&1 &
 echo $! > "$PIDFILE"
-echo "Started project supervisor '$PROJECT_NAME' with PID $(cat "$PIDFILE")"
+SUPERVISOR_PID="$(cat "$PIDFILE")"
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v caffeinate >/dev/null 2>&1; then
+  nohup caffeinate -is -w "$SUPERVISOR_PID" >/dev/null 2>&1 &
+  echo $! > "$CAFFEINATE_PIDFILE"
+  echo "Started project supervisor '$PROJECT_NAME' with PID $SUPERVISOR_PID"
+  echo "Automatic caffeinate enabled with PID $(cat "$CAFFEINATE_PIDFILE")"
+else
+  echo "Started project supervisor '$PROJECT_NAME' with PID $SUPERVISOR_PID"
+fi
+
 echo "Tail logs with: tail -f '$LOGFILE'"
