@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -296,6 +297,51 @@ class ContinuumCliIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: self.notify_log.exists(), timeout=10.0)
         contents = self.notify_log.read_text(encoding="utf-8")
         self.assertIn('"event_type": "inactivity"', contents)
+
+    def test_status_prefers_running_when_restart_timed_out_but_worker_is_live(self) -> None:
+        self.init_runner()
+        self.write_single_project_config()
+
+        state_dir = self.runtime_root / self.project_slug / "state"
+        log_dir = self.runtime_root / self.project_slug / "logs"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        log_path = log_dir / "codex.log"
+        log_path.write_text("still working\n", encoding="utf-8")
+        now = time.time()
+        os.utime(log_path, (now, now))
+
+        state_payload = {
+            "state_version": 2,
+            "project": self.project_name,
+            "updated_at": "2026-04-02T12:00:00+00:00",
+            "phase": "initial",
+            "pass_num": 1,
+            "state_kind": "running",
+            "path": str(self.repo),
+            "profile": None,
+            "started_at": "2026-04-02T12:00:00+00:00",
+            "pass_started_at": "2026-04-02T12:00:00+00:00",
+            "last_status": "RUNNING",
+            "status_detail": "Codex pass is running.",
+            "active_codex_pid": 999999,
+        }
+        self.status_path.write_text(json.dumps(state_payload, indent=2) + "\n", encoding="utf-8")
+
+        restart_state = {
+            "project": self.project_name,
+            "phase": "timed_out",
+            "detail": "Graceful restart timed out.",
+        }
+        (self.runner / f"restart.{self.project_slug}.json").write_text(
+            json.dumps(restart_state, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        status = self.status_json()
+        self.assertEqual(status.get("restart_phase"), "timed_out")
+        self.assertEqual(status.get("overall_status"), "running")
 
 
 def sys_platform() -> str:

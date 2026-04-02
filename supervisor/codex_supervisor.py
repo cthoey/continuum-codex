@@ -380,6 +380,7 @@ def run_codex_command(
     inactivity_after_seconds: int = 0,
     on_inactive: Callable[[int], None] | None = None,
     on_activity_resumed: Callable[[], None] | None = None,
+    on_heartbeat: Callable[[int, bool], None] | None = None,
 ) -> tuple[int, str, str]:
     ensure_dir(log_path.parent)
     start_offset = log_path.stat().st_size if log_path.exists() else 0
@@ -403,6 +404,7 @@ def run_codex_command(
         except Exception:
             pass
         inactivity_notified = False
+        last_heartbeat_ts = 0.0
 
         while True:
             try:
@@ -428,6 +430,13 @@ def run_codex_command(
                     inactivity_notified = True
                     if on_inactive is not None:
                         on_inactive(inactive_for)
+
+            now = time.time()
+            if on_heartbeat is not None and (
+                STOP_EVENT.is_set() or now - last_heartbeat_ts >= 30.0
+            ):
+                last_heartbeat_ts = now
+                on_heartbeat(proc.pid, inactivity_notified)
 
         stdout_text, _ = proc.communicate()
         final_message = stdout_text or ""
@@ -603,6 +612,44 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                 pass_num=pass_num,
             )
 
+        def on_heartbeat(pid: int, inactive: bool) -> None:
+            current_state = load_json_file(state_path)
+            state_kind = STATE_INACTIVE if inactive else STATE_RUNNING
+            status_detail = "Codex pass is running."
+            if STOP_EVENT.is_set():
+                status_detail = "Stop requested; waiting for the current pass to finish."
+            elif current_state.get("state_kind") == STATE_INACTIVE:
+                status_detail = str(current_state.get("status_detail") or "No log activity detected.")
+
+            payload = build_state_payload(
+                runtime,
+                project,
+                phase,
+                pass_num,
+                state_kind,
+                prior_state=prior_state,
+                last_status="RUNNING",
+                status_detail=status_detail,
+                command=cmd,
+                pass_started_at=pass_started_at,
+                active_codex_pid=pid,
+                last_message_file=str(last_message_path),
+                log_file=str(log_path),
+            )
+            for key in (
+                "control_action",
+                "control_requested_at",
+                "control_acknowledged_at",
+                "inactivity_detected_at",
+                "inactivity_seconds",
+                "inactivity_cleared_at",
+            ):
+                if key in current_state:
+                    payload[key] = current_state[key]
+            if STOP_EVENT.is_set():
+                payload["control_action"] = "stop_after_pass"
+            write_json(state_path, payload)
+
         exit_code, final_message, log_excerpt = run_codex_command(
             cmd,
             log_path,
@@ -610,6 +657,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             inactivity_after_seconds=runtime.inactivity_notify_after_seconds,
             on_inactive=on_inactive,
             on_activity_resumed=on_activity_resumed,
+            on_heartbeat=on_heartbeat,
         )
         write_text(last_message_path, final_message)
         parsed = parse_status(final_message)

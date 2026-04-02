@@ -1,10 +1,10 @@
 # Continuum for Codex: Linux Single-Project Setup
 
-Continuum keeps long-running Codex CLI projects moving.
+Continuum is an open-source control layer for long-running Codex CLI projects.
 
-Use this setup when you keep nudging the same repo forward with "continue" and the work mostly needs continuity, not constant judgment. Do not use it when the project still needs frequent human decisions, prompt reframing, or review after every small step.
+Use this setup when you find yourself repeatedly nudging the same Codex project forward with the same prompt, for example `Proceed`. Do not use it when the work still needs frequent human decisions, prompt reframing, or review after every small step.
 
-This guide enables exactly one repo for autonomous work. Other repos on the machine stay normal interactive Codex repos unless you opt them in later.
+This guide enables exactly one project for autonomous work. Other projects on the machine stay normal interactive Codex projects unless you opt them in later.
 
 This guide is Linux-specific because it assumes a Unix shell, `npm` for Codex CLI install, and `systemd --user` for the cleaner long-lived service path. The detached runner path still works even if your machine does not use systemd.
 
@@ -12,12 +12,12 @@ This guide is Linux-specific because it assumes a Unix shell, `npm` for Codex CL
 
 - Linux
 - Codex CLI access
-- a Git repo you want to run autonomously
+- a Git-based project you want to run autonomously
 - Python 3
 - Git
 - Node.js and `npm`
 
-This guide assumes the Continuum repo is cloned locally:
+This guide assumes the Continuum project is cloned locally:
 
 ```bash
 git clone git@github.com:cthoey/continuum-codex.git
@@ -25,14 +25,14 @@ cd continuum-codex
 export KIT_ROOT="$PWD"
 ```
 
-It also assumes your target repo has an absolute path:
+It also assumes your target project has an absolute path:
 
 ```bash
 export PROJECT_PATH="/absolute/path/to/project"
 export PROJECT_NAME="my-project"
 ```
 
-Sanity check the repo path:
+Sanity check the project path:
 
 ```bash
 test -d "$PROJECT_PATH" && git -C "$PROJECT_PATH" rev-parse --is-inside-work-tree
@@ -54,7 +54,7 @@ Example:
 The goal of this project is to port Mischief Makers to a native desktop application using N64Recomp and the supporting runtime/toolchain needed to make it run reliably on Linux, macOS, and Windows.
 ```
 
-Do not rely on Codex to infer the long-term goal from the repo name alone.
+Do not rely on Codex to infer the long-term goal from the project name alone.
 
 ## 2. Install and authenticate Codex CLI
 
@@ -98,7 +98,7 @@ Important defaults in the sample config:
 - `sandbox_mode = "workspace-write"`
 - `sandbox_workspace_write.network_access = false`
 
-That means unattended runs do not pause for approval. If a tool install or network action is blocked by the current environment, the repo should record the blocker and continue with other useful work when possible.
+That means unattended runs do not pause for approval. If a tool install or network action is blocked by the current environment, the project should record the blocker and continue with other useful work when possible.
 
 ## 4. Create the runner
 
@@ -123,7 +123,7 @@ Run the built-in setup check:
 
 ## 5. Enable the project
 
-Use the CLI instead of hand-editing `projects.json`, repo `AGENTS.md`, and `docs/codex-progress.md`:
+Use the CLI instead of hand-editing `projects.json`, project `AGENTS.md`, and `docs/codex-progress.md`:
 
 ```bash
 "$KIT_ROOT/continuum" enable "$PROJECT_PATH" \
@@ -134,7 +134,7 @@ Use the CLI instead of hand-editing `projects.json`, repo `AGENTS.md`, and `docs
 What the helper writes:
 
 - a project entry in `projects.json`
-- a managed autonomous block inside the repo root `AGENTS.md`
+- a managed autonomous block inside the project root `AGENTS.md`
 - `docs/codex-progress.md` if it does not already exist
 
 It also auto-detects common planning docs such as `README.md`, `docs/ROADMAP.md`, and `docs/EXECUTION_PLAN.md`.
@@ -187,7 +187,7 @@ What to expect:
 - `STATUS: CONTINUE` means keep looping
 - `STATUS: DONE` or `STATUS: BLOCKED: ...` means stop
 
-If you prefer a status/control surface, this is the point where a menu bar or panel integration becomes useful. Project provisioning stays script-based, but day-to-day start, stop, and restart actions can move into your preferred shell, desktop launcher, or status widget once the repo is enabled.
+If you prefer a status/control surface, this is the point where a menu bar or panel integration becomes useful. Project provisioning stays script-based, but day-to-day start, stop, and restart actions can move into your preferred shell, desktop launcher, or status widget once the project is enabled.
 
 ## 7. Make the service survive logout
 
@@ -265,15 +265,15 @@ Detached-mode emergency restart:
 - If you want external delivery, add `notification_command` or `notification_webhook_url` in `~/continuum-runner/projects.json`.
 - After you restore credits or limits, launch or restart the project again.
 
-## 10. Keep other repos non-autonomous
+## 10. Keep other projects non-autonomous
 
-If you want autonomy only for this one repo:
+If you want autonomy only for this one project:
 
-- do not add other repos to `~/continuum-runner/projects.json`
-- do not copy the autonomous repo-local `AGENTS.md` block into other repos
+- do not add other projects to `~/continuum-runner/projects.json`
+- do not copy the autonomous project-local `AGENTS.md` block into other projects
 - do not put the `STATUS:` continuation protocol into `~/.codex/AGENTS.md`
 
-That keeps every other repo in normal interactive mode.
+That keeps every other project in normal interactive mode.
 
 ## Result
 

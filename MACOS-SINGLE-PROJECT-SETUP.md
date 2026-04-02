@@ -1,21 +1,21 @@
 # Continuum for Codex: macOS Single-Project Setup
 
-Continuum keeps long-running Codex CLI projects moving.
+Continuum is an open-source control layer for long-running Codex CLI projects.
 
-Use this setup when you keep nudging the same repo forward with "continue" and the work mostly needs continuity, not constant judgment. Do not use it when the project still needs frequent human decisions, prompt reframing, or review after every small step.
+Use this setup when you find yourself repeatedly nudging the same Codex project forward with the same prompt, for example `Proceed`. Do not use it when the work still needs frequent human decisions, prompt reframing, or review after every small step.
 
-This guide enables exactly one repo for autonomous work. Other repos on the machine stay normal interactive Codex repos unless you opt them in later.
+This guide enables exactly one project for autonomous work. Other projects on the machine stay normal interactive Codex projects unless you opt them in later.
 
-This guide is macOS-specific because it uses Homebrew and the built-in `caffeinate` integration. The runner itself is plain Python and shell, so the core Continuum flow is also suitable for Linux with Linux-appropriate install and sleep-management choices.
+This guide is macOS-specific because it uses Homebrew and the built-in `caffeinate` integration. The runner itself is plain Python and shell, and it can also be used in Linux environments with Linux-appropriate install and sleep-management choices.
 
 ## Requirements
 
 - macOS
 - Codex CLI access
-- a Git repo you want to run autonomously
+- a Git-based project you want to run autonomously
 - Python 3
 
-This guide assumes the Continuum repo is cloned locally:
+This guide assumes the Continuum project is cloned locally:
 
 ```bash
 git clone git@github.com:cthoey/continuum-codex.git
@@ -23,14 +23,14 @@ cd continuum-codex
 export KIT_ROOT="$PWD"
 ```
 
-It also assumes your target repo has an absolute path:
+It also assumes your target project has an absolute path:
 
 ```bash
 export PROJECT_PATH="/absolute/path/to/project"
 export PROJECT_NAME="my-project"
 ```
 
-Sanity check the repo path:
+Sanity check the project path:
 
 ```bash
 test -d "$PROJECT_PATH" && git -C "$PROJECT_PATH" rev-parse --is-inside-work-tree
@@ -52,7 +52,7 @@ Example:
 The goal of this project is to decompile the Game Boy Advance game Mega Man Zero 3 for the eventual purpose of running it natively on macOS, Linux, and Windows.
 ```
 
-Do not rely on Codex to infer the long-term goal from the repo name alone.
+Do not rely on Codex to infer the long-term goal from the project name alone.
 
 ## 2. Install and authenticate Codex CLI
 
@@ -94,7 +94,7 @@ Important defaults in the sample config:
 - `sandbox_mode = "workspace-write"`
 - `sandbox_workspace_write.network_access = false`
 
-That means unattended runs do not pause for approval. If a tool install or network action is blocked by the current environment, the repo should record the blocker and continue with other useful work when possible.
+That means unattended runs do not pause for approval. If a tool install or network action is blocked by the current environment, the project should record the blocker and continue with other useful work when possible.
 
 ## 4. Create the runner
 
@@ -119,7 +119,7 @@ Run the built-in setup check:
 
 ## 5. Enable the project
 
-Use the CLI instead of hand-editing `projects.json`, repo `AGENTS.md`, and `docs/codex-progress.md`:
+Use the CLI instead of hand-editing `projects.json`, project `AGENTS.md`, and `docs/codex-progress.md`:
 
 ```bash
 "$KIT_ROOT/continuum" enable "$PROJECT_PATH" \
@@ -130,7 +130,7 @@ Use the CLI instead of hand-editing `projects.json`, repo `AGENTS.md`, and `docs
 What the helper writes:
 
 - a project entry in `projects.json`
-- a managed autonomous block inside the repo root `AGENTS.md`
+- a managed autonomous block inside the project root `AGENTS.md`
 - `docs/codex-progress.md` if it does not already exist
 
 It also auto-detects common planning docs such as `README.md`, `docs/ROADMAP.md`, and `docs/EXECUTION_PLAN.md`.
@@ -183,7 +183,7 @@ What to expect:
 - `STATUS: CONTINUE` means keep looping
 - `STATUS: DONE` or `STATUS: BLOCKED: ...` means stop
 
-If you prefer SwiftBar, this is the point where it becomes useful. Project provisioning stays script-based, but day-to-day start, stop, and restart actions can happen from the menu bar once the repo is enabled.
+If you prefer [SwiftBar](https://github.com/cthoey/swiftbar-plugins), this is the point where it becomes useful. Project provisioning stays script-based, but day-to-day start, stop, restart, log inspection, and state-file access can happen from the menu bar once the project is enabled.
 
 ## 7. Restart or stop it cleanly
 
@@ -252,22 +252,22 @@ Detached-mode emergency restart:
 - If you want external delivery, add `notification_command` or `notification_webhook_url` in `~/continuum-runner/projects.json`.
 - After you restore credits or limits, launch or restart the project again.
 
-## 9. Keep other repos non-autonomous
+## 9. Keep other projects non-autonomous
 
-If you want autonomy only for this one repo:
+If you want autonomy only for this one project:
 
-- do not add other repos to `~/continuum-runner/projects.json`
-- do not copy the autonomous repo-local `AGENTS.md` block into other repos
+- do not add other projects to `~/continuum-runner/projects.json`
+- do not copy the autonomous project-local `AGENTS.md` block into other projects
 - do not put the `STATUS:` continuation protocol into `~/.codex/AGENTS.md`
 
-That keeps every other repo in normal interactive mode.
+That keeps every other project in normal interactive mode.
 
 ## Result
 
 After this setup:
 
 - Codex has reusable unattended profiles
-- the selected repo has a long-term goal and autonomous status protocol
-- the runner can keep resuming that one repo until it reports `DONE` or `BLOCKED`
+- the selected project has a long-term goal and autonomous status protocol
+- the runner can keep resuming that one project until it reports `DONE` or `BLOCKED`
 - macOS sleep prevention is automatic while the worker is active
-- other repos remain normal unless you explicitly opt them in later
+- other projects remain normal unless you explicitly opt them in later

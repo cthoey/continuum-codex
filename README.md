@@ -1,26 +1,26 @@
 # Continuum for Codex
 
-Continuum keeps long-running Codex CLI projects moving.
+Continuum is an open-source control layer for long-running Codex CLI projects.
 
-Use it when you keep nudging the same repo forward with "continue" and the project mostly needs continuity, not constant judgment. Do not use it when the work still needs frequent human decisions, prompt reframing, or review after every small step.
+Use it when you find yourself repeatedly nudging the same Codex project forward with the same prompt, for example `Proceed`. Do not use it when the work still needs frequent human decisions, prompt reframing, or review after every small step.
 
-The name is literal: Continuum exists to preserve continuity across many Codex passes.
-
-Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
+The name refers to continuity across many Codex passes. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## What it does
 
-- opt-in autonomous runs per repo, not one global autonomous mode
+- opt-in autonomous runs per project, not one global autonomous mode
+- can run one or more autonomous projects simultaneously
 - starts with `codex exec` and resumes with `codex exec resume --last`
-- writes project-specific goals and status rules into repo-local `AGENTS.md`
-- keeps a durable repo-local progress log in `docs/codex-progress.md`
-- launches, stops, and gracefully restarts one project at a time
+- writes project-specific goals and status rules into project-local `AGENTS.md`
+- keeps a durable project-local progress log in `docs/codex-progress.md`
+- provides per-project start, pause, stop, stop-now, and restart controls
 - supports explicit `paused`, `stopped`, `force-stopped`, `rate-limited`, `blocked`, `failed`, and `done` runtime states
 - records per-project logs and runtime state
 - retries temporary rate limits and stops on surfaced hard quota exhaustion
-- works on Unix-like systems, with built-in `caffeinate` sleep prevention on macOS
+- can be used in macOS and Linux environments
+- uses built-in `caffeinate` sleep prevention on macOS
 - can run under `launchctl` on macOS or `systemd --user` on Linux for a cleaner long-lived background runtime
-- can expose project status and controls through SwiftBar
+- can expose project status and controls through [SwiftBar](https://github.com/cthoey/swiftbar-plugins)
 - can emit local alerts, append a runner event log, call an external notification command, or POST a webhook payload
 - can make milestone commits and pushes if your Codex rules allow Git commands
 
@@ -28,11 +28,11 @@ Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 
 1. Put reusable Codex profiles in `~/.codex/config.toml`.
 2. Run `continuum init` to create or refresh the runner and home config.
-3. Run `continuum enable` with a repo path and a long-term project goal.
+3. Run `continuum enable` with a project path and a long-term project goal.
 4. Launch that project with `continuum start <name>` or `continuum service start <name>`.
-5. Continuum keeps resuming the same Codex thread until the model ends with `STATUS: DONE` or `STATUS: BLOCKED: ...`.
+5. Continuum keeps the project going in the same Codex thread until the model reports that it has achieved its goal, or ran into a blocker.
 
-Only repos you explicitly enable become autonomous.
+Only projects you explicitly enable become autonomous.
 
 The stable home-level control path is `~/.config/continuum/config.toml` plus `~/continuum-runner`.
 
@@ -62,7 +62,7 @@ EOF
 ./continuum doctor
 ```
 
-Enable one repo:
+Enable one project:
 
 ```bash
 ./continuum enable /absolute/path/to/project \
@@ -83,7 +83,7 @@ Or use the service-managed path:
 ./continuum service start my-project
 ```
 
-That is enough to start one autonomous project. For the full from-scratch walkthroughs, see [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md) or [LINUX-SINGLE-PROJECT-SETUP.md](LINUX-SINGLE-PROJECT-SETUP.md).
+That is enough to start one autonomous project. For full setup walkthroughs, see [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md) or [LINUX-SINGLE-PROJECT-SETUP.md](LINUX-SINGLE-PROJECT-SETUP.md).
 
 ## Day-to-day commands
 
@@ -192,21 +192,21 @@ Inspect the runner event log:
 tail -f ~/continuum-runner/continuum-notify.log
 ```
 
-If you use SwiftBar, enable the project once with `continuum enable` and then use the menu bar plugin to start, restart, `Stop after pass`, or `Stop now`.
+If you use [SwiftBar](https://github.com/cthoey/swiftbar-plugins), enable the project once with `continuum enable` and then use the menu bar plugin to start, restart, `Stop after pass`, `Stop now`, inspect logs, and open the project state files.
 
 ## Testing
 
-Run the integration suite from the repo root:
+Run the integration suite from the project root:
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-These tests exercise the real `continuum` CLI against temporary repos and runner directories, including enablement, service definition generation, pause and stop-now behavior, inactivity detection, and notification/state output.
+These tests exercise the real `continuum` CLI against temporary projects and runner directories, including enablement, service definition generation, pause and stop-now behavior, inactivity detection, and notification/state output.
 
 ## Operational notes
 
-- Continuum is project-specific by design. Repos that are not in `projects.json` remain ordinary interactive Codex repos.
+- Continuum is project-specific by design. Projects that are not in `projects.json` remain ordinary interactive Codex projects.
 - The stable install target is the home-level pair `~/.config/continuum/config.toml` and `~/continuum-runner`. Other paths should be treated as implementation detail or development setup.
 - The runner is plain Python and shell, so the core flow is not macOS-only.
 - On macOS, both detached launches and service mode keep the machine awake while a worker is active. The detached path uses `caffeinate -is -w <supervisor-pid>`, and service mode does the same inside `service_runner.py`.
@@ -225,7 +225,7 @@ These tests exercise the real `continuum` CLI against temporary repos and runner
 - Milestone commits and pushes require Codex rules that allow `git add`, `git commit`, and `git push` outside the sandbox.
 - The supervisor path does not require the interactive Stop hook.
 
-## Repository layout
+## Project layout
 
 - [supervisor/](supervisor/): runner scripts, project enabler, example config
 - [supervisor/service_runner.py](supervisor/service_runner.py): foreground wrapper for launchctl and systemd service mode

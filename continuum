@@ -355,24 +355,54 @@ def humanize_age(raw: str | None) -> str | None:
     return f"{delta // 86400}d ago"
 
 
+def age_seconds(raw: str | None) -> int | None:
+    dt = parse_dt(raw)
+    if dt is None:
+        return None
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0, int((now - dt.astimezone(timezone.utc)).total_seconds()))
+
+
+def row_looks_live(row: dict[str, Any]) -> bool:
+    if bool(row.get("supervisor_running")) or bool(row.get("active_codex_running")):
+        return True
+
+    activity_age_seconds = row.get("activity_age_seconds")
+    state_kind = row.get("state_kind")
+    last_status = row.get("last_status")
+    if isinstance(activity_age_seconds, int) and activity_age_seconds <= 15 * 60:
+        if state_kind in {"running", "inactive", "rate_limited_wait"}:
+            return True
+        if last_status in {"RUNNING", "RATE_LIMIT_WAIT"}:
+            return True
+    return False
+
+
 def derive_overall_status(row: dict[str, Any]) -> str:
+    state_kind = row.get("state_kind")
+    supervisor_running = bool(row.get("supervisor_running"))
+    row_live = row_looks_live(row)
+
     restart_phase = row.get("restart_phase")
     if restart_phase:
-        return f"restart:{restart_phase}"
+        if restart_phase in {"timed_out", "failed"} and row_live:
+            restart_phase = None
+        else:
+            return f"restart:{restart_phase}"
 
     control_action = row.get("control_action")
     control_phase = row.get("control_phase")
     if control_action == "pause_after_pass" and control_phase:
         return f"pause:{control_phase}"
 
-    state_kind = row.get("state_kind")
-    supervisor_running = bool(row.get("supervisor_running"))
     if state_kind == "running":
-        return "running" if supervisor_running else "stale"
+        return "running" if (supervisor_running or row_live) else "stale"
     if state_kind == "inactive":
-        return "inactive" if supervisor_running else "stale"
+        return "inactive" if (supervisor_running or row_live) else "stale"
     if state_kind == "rate_limited_wait":
-        return "waiting" if supervisor_running else "stale"
+        return "waiting" if (supervisor_running or row_live) else "stale"
     if state_kind == "paused":
         return "paused"
     if state_kind == "stopped":
@@ -389,7 +419,7 @@ def derive_overall_status(row: dict[str, Any]) -> str:
         return "max-passes"
 
     last_status = row.get("last_status")
-    if supervisor_running:
+    if row_live:
         return "running"
     if last_status == "DONE":
         return "done"
@@ -1081,6 +1111,7 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
         activity_at = None
         if log_path.exists():
             activity_at = datetime.fromtimestamp(log_path.stat().st_mtime, tz=timezone.utc).isoformat()
+        activity_age_seconds = age_seconds(activity_at)
 
         progress_path = Path(str(item.get("path", ""))).expanduser() / "docs" / "codex-progress.md"
         progress_at = None
@@ -1100,6 +1131,7 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
             control_phase = control_state.get("phase")
             control_detail = control_state.get("detail")
 
+        active_codex_running = pid_is_alive(active_codex_pid if isinstance(active_codex_pid, int) else None)
         row = {
             "name": name,
             "enabled": bool(item.get("enabled", True)),
@@ -1120,9 +1152,11 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
             "finished_age": humanize_age(finished_at),
             "activity_at": activity_at,
             "activity_age": humanize_age(activity_at),
+            "activity_age_seconds": activity_age_seconds,
             "progress_at": progress_at,
             "progress_age": humanize_age(progress_at),
             "active_codex_pid": active_codex_pid,
+            "active_codex_running": active_codex_running,
             "supervisor_pid": supervisor_pid,
             "supervisor_running": running,
             "state_path": str(state_path),
@@ -1262,7 +1296,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     if global_agents.exists():
         agents_text = global_agents.read_text(encoding="utf-8", errors="replace")
         if file_contains_status_protocol(agents_text):
-            add_result(results, WARN, "global_agents", "Global ~/.codex/AGENTS.md contains the STATUS protocol. Keep that protocol repo-local unless you want it in every interactive session.")
+            add_result(results, WARN, "global_agents", "Global ~/.codex/AGENTS.md contains the STATUS protocol. Keep that protocol project-local unless you want it in every interactive session.")
         else:
             add_result(results, PASS, "global_agents", f"Global AGENTS file found at {global_agents}.")
     else:
@@ -1389,9 +1423,9 @@ def run_doctor(args: argparse.Namespace) -> int:
                     continue
 
                 if check_git_repo(project_path):
-                    add_result(results, PASS, f"project:{name}:git", f"{name}: project path is a git repo.")
+                    add_result(results, PASS, f"project:{name}:git", f"{name}: project path is a git repository.")
                 else:
-                    add_result(results, FAIL, f"project:{name}:git", f"{name}: project path is not a valid git repo.")
+                    add_result(results, FAIL, f"project:{name}:git", f"{name}: project path is not a valid git repository.")
 
                 agents_path = project_path / "AGENTS.md"
                 if agents_path.exists():
@@ -1404,7 +1438,7 @@ def run_doctor(args: argparse.Namespace) -> int:
                     else:
                         add_result(results, FAIL, f"project:{name}:agents", f"{name}: AGENTS.md exists but does not contain the required STATUS protocol.")
                 else:
-                    add_result(results, FAIL, f"project:{name}:agents", f"{name}: missing repo AGENTS.md.")
+                    add_result(results, FAIL, f"project:{name}:agents", f"{name}: missing project AGENTS.md.")
 
                 progress_path = project_path / "docs" / "codex-progress.md"
                 if progress_path.exists():
@@ -1418,9 +1452,9 @@ def run_doctor(args: argparse.Namespace) -> int:
                     if trust_level is None:
                         trust_level = lookup_path(project_trust, str(project_path.resolve()), "trust_level")
                 if trust_level == "trusted":
-                    add_result(results, PASS, f"project:{name}:trust", f"{name}: repo is marked trusted in ~/.codex/config.toml.")
+                    add_result(results, PASS, f"project:{name}:trust", f"{name}: project is marked trusted in ~/.codex/config.toml.")
                 else:
-                    add_result(results, WARN, f"project:{name}:trust", f"{name}: repo is not marked trusted in ~/.codex/config.toml. Project-scoped .codex settings may be ignored.")
+                    add_result(results, WARN, f"project:{name}:trust", f"{name}: project is not marked trusted in ~/.codex/config.toml. Project-scoped .codex settings may be ignored.")
 
     pass_count = sum(1 for item in results if item.status == PASS)
     warn_count = sum(1 for item in results if item.status == WARN)
@@ -1453,13 +1487,13 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--home-runner-link", default=DEFAULT_HOME_RUNNER, help="Home-level runner path or symlink.")
     init.add_argument("--force", action="store_true", help="Overwrite copied runner scripts and refresh home config if it differs.")
 
-    enable = subparsers.add_parser("enable", help="Enable a repo for autonomous Continuum runs.")
-    enable.add_argument("project_path", help="Absolute or relative path to the target git repo.")
+    enable = subparsers.add_parser("enable", help="Enable a project for autonomous Continuum runs.")
+    enable.add_argument("project_path", help="Absolute or relative path to the target project root.")
     enable.add_argument("--goal", required=True, help="Long-term project goal.")
     enable.add_argument("--name", help="Project name for logs and status output.")
     enable.add_argument("--profile", default="autonomous", help="Runner profile name.")
-    enable.add_argument("--review", action="append", default=[], metavar="PATH", help="Repo-relative doc to review before choosing the next task. Repeatable.")
-    enable.add_argument("--progress-path", default="docs/codex-progress.md", help="Repo-relative progress log path.")
+    enable.add_argument("--review", action="append", default=[], metavar="PATH", help="Project-relative doc to review before choosing the next task. Repeatable.")
+    enable.add_argument("--progress-path", default="docs/codex-progress.md", help="Project-relative progress log path.")
     enable.add_argument("--runner-root", help="Runner root to use.")
     enable.add_argument("--home-config", default=HOME_CONFIG_DEFAULT, help="Path to ~/.config/continuum/config.toml.")
     enable.add_argument("--config", help="Explicit path to projects.json.")
