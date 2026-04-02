@@ -6,6 +6,8 @@ Use this setup when you keep nudging the same repo forward with "continue" and t
 
 This guide enables exactly one repo for autonomous work. Other repos on the machine stay normal interactive Codex repos unless you opt them in later.
 
+This guide is macOS-specific because it uses Homebrew and the built-in `caffeinate` integration. The runner itself is plain Python and shell, so the core Continuum flow is also suitable for Linux with Linux-appropriate install and sleep-management choices.
+
 ## Requirements
 
 - macOS

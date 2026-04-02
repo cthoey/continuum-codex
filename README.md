@@ -17,7 +17,7 @@ Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 - launches, stops, and gracefully restarts one project at a time
 - records per-project logs and runtime state
 - retries temporary rate limits and stops on surfaced hard quota exhaustion
-- keeps macOS awake with `caffeinate` while workers are active
+- works on Unix-like systems, with built-in `caffeinate` sleep prevention on macOS
 - can expose project status and controls through SwiftBar
 - can make milestone commits and pushes if your Codex rules allow Git commands
 
@@ -77,7 +77,7 @@ cd ~/continuum-runner
 ./launch_project.sh my-project
 ```
 
-That is enough to start one autonomous project. For the full from-scratch walkthrough, see [MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md](MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md).
+That is enough to start one autonomous project. For the full from-scratch walkthrough, see [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md).
 
 ## Day-to-day commands
 
@@ -120,6 +120,7 @@ If you use SwiftBar, enable the project once with `enable_project.py` and then u
 ## Operational notes
 
 - Continuum is project-specific by design. Repos that are not in `projects.json` remain ordinary interactive Codex repos.
+- The runner is plain Python and shell, so the core flow is not macOS-only.
 - On macOS, project launches start `caffeinate -is -w <supervisor-pid>`. This is intentional and prevents idle system sleep while a worker is active.
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time; it only reacts to surfaced Codex failures.
 - Temporary rate limits back off and retry. Surfaced hard quota exhaustion stops the worker and records the failure.
@@ -132,5 +133,5 @@ If you use SwiftBar, enable the project once with `enable_project.py` and then u
 - [supervisor/](supervisor/): runner scripts, project enabler, example config
 - [samples/](samples/): sample Codex config, AGENTS files, optional hook files
 - [scripts/install_home.py](scripts/install_home.py): writes `~/.config/continuum/config.toml` and a `~/continuum-runner` alias
-- [MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md](MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md): detailed setup guide
+- [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md): detailed setup guide
 - [RELEASE_NOTES_v0.1.0.md](RELEASE_NOTES_v0.1.0.md): first public release notes
