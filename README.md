@@ -186,6 +186,16 @@ tail -f ~/continuum-runner/continuum-notify.log
 
 If you use SwiftBar, enable the project once with `continuum enable` and then use the menu bar plugin to start, stop, and restart it.
 
+## Testing
+
+Run the integration suite from the repo root:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+These tests exercise the real `continuum` CLI against temporary repos and runner directories, including enablement, service definition generation, pause and force-stop behavior, inactivity detection, and notification/state output.
+
 ## Operational notes
 
 - Continuum is project-specific by design. Repos that are not in `projects.json` remain ordinary interactive Codex repos.
@@ -212,6 +222,7 @@ If you use SwiftBar, enable the project once with `continuum enable` and then us
 - [supervisor/force_stop_project.sh](supervisor/force_stop_project.sh): detached-mode emergency stop
 - [supervisor/force_restart_project.sh](supervisor/force_restart_project.sh): detached-mode emergency restart
 - [samples/](samples/): sample Codex config, AGENTS files, optional hook files
+- [tests/](tests/): integration tests for the CLI, runner state model, and notifier flow
 - [continuum](continuum): CLI entry point, starting with `continuum doctor`
 - [scripts/install_home.py](scripts/install_home.py): writes `~/.config/continuum/config.toml` and a `~/continuum-runner` alias
 - [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md): detailed setup guide

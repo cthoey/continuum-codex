@@ -17,6 +17,7 @@ the `0.x` phase while the install shape and operator workflow continue to evolve
 - added launchctl and systemd user-service support through `continuum service ...`
 - strengthened the runtime state model and added explicit `pause`, `force-stop`, and `force-restart` controls
 - added richer notification events, a runner event log, optional external command/webhook delivery, and inactivity alerts
+- added CLI integration tests covering enablement, service definitions, pause/force-stop behavior, inactivity detection, and runtime notifications
 
 ## [0.1.0] - 2026-04-02
 
