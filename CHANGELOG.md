@@ -5,6 +5,14 @@ All notable changes to Continuum for Codex will be documented in this file.
 The format is based on Keep a Changelog and this project follows Semantic Versioning, starting in
 the `0.x` phase while the install shape and operator workflow continue to evolve.
 
+## [Unreleased]
+
+### Changed
+
+- rewrote the README around what Continuum is, when to use it, and how to operate it
+- simplified the macOS single-project setup guide
+- removed the standalone branding document and folded the minimal naming note into the main docs
+
 ## [0.1.0] - 2026-04-02
 
 ### Added

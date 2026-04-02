@@ -1,227 +1,136 @@
-# Continuum
+# Continuum for Codex
 
-Continuum for Codex.
+Continuum keeps long-running Codex CLI projects moving.
 
-This repository is still physically named `codex-autonomous-kit` for now, but the product and UI
-name is `Continuum`.
+Use it when you keep nudging the same repo forward with "continue" and the project mostly needs continuity, not constant judgment. Do not use it when the work still needs frequent human decisions, prompt reframing, or review after every small step.
 
-Continuum is a starter kit for running OpenAI Codex CLI on long-lived autonomous project loops.
+The name is literal: Continuum exists to preserve continuity across many Codex passes.
 
-This kit is aimed at a specific pain point:
+Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md).
 
-- you have a long-running project that mostly needs more time rather than constant human steering
-- you find yourself submitting the same follow-up prompt over and over just to keep Codex moving
-- the next step is usually "continue from the last checkpoint and keep going" rather than a fresh
-  strategic decision every few minutes
+## What it does
 
-This repo packages a small supervisor plus sample config and instruction files so you can:
+- opt-in autonomous runs per repo, not one global autonomous mode
+- starts with `codex exec` and resumes with `codex exec resume --last`
+- writes project-specific goals and status rules into repo-local `AGENTS.md`
+- keeps a durable repo-local progress log in `docs/codex-progress.md`
+- launches, stops, and gracefully restarts one project at a time
+- records per-project logs and runtime state
+- retries temporary rate limits and stops on surfaced hard quota exhaustion
+- keeps macOS awake with `caffeinate` while workers are active
+- can expose project status and controls through SwiftBar
+- can make milestone commits and pushes if your Codex rules allow Git commands
 
-- run autonomous Codex work project-by-project
-- keep one Codex thread chain per working directory
-- resume unfinished work automatically with `codex exec resume --last`
-- record logs and state per project
-- handle temporary rate limits differently from hard quota exhaustion
-- checkpoint major milestones with git commits and pushes
+## How it works
 
-## Naming
+1. Put reusable Codex profiles in `~/.codex/config.toml`.
+2. Create a runner directory that contains the supervisor scripts and `projects.json`.
+3. Run `enable_project.py` with a repo path and a long-term project goal.
+4. Launch that project with `launch_project.sh <name>`.
+5. Continuum keeps resuming the same Codex thread until the model ends with `STATUS: DONE` or `STATUS: BLOCKED: ...`.
 
-- Product/app name: `Continuum`
-- Descriptor: `Continuum for Codex`
-- Current GitHub repository slug: `continuum-codex`
-- Current local folder name in this tree: `codex-autonomous-kit` (transition name)
-- Recommended future local runner folder: `~/continuum-runner`
-- Recommended future user config location: `~/.config/continuum/config.toml`
+Only repos you explicitly enable become autonomous.
 
-See [BRANDING.md](BRANDING.md) for the naming map and terminology.
+## Quick start
 
-## Version
-
-Current version: `0.1.0`
-
-See [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## Good Fit
-
-Use this kit when:
-
-- the project has a clear long-term goal and a stable working frontier
-- Codex can usually choose the next useful step from repo docs and recent progress notes
-- you mostly want automatic continuation, logging, and checkpointing
-- you would otherwise keep nudging the agent forward with near-repetitive prompts
-
-Do not use this kit when:
-
-- the project needs frequent product or architecture decisions from you
-- the next task is ambiguous enough that the agent needs constant steering
-- the work is risky enough that you want to review each chunk before it continues
-- you are still discovering the problem and the prompt has to change substantially from turn to turn
-
-## How It Works
-
-The kit uses a simple loop:
-
-1. first pass:
-   `codex exec -C <repo> -p <profile> "<initial prompt>"`
-2. later passes:
-   `codex exec -C <repo> -p <profile> resume --last "<follow-up prompt>"`
-3. the repo-local `AGENTS.md` tells Codex to end with one status line:
-   - `STATUS: CONTINUE`
-   - `STATUS: DONE`
-   - `STATUS: BLOCKED: <reason>`
-4. the supervisor reads that status and decides whether to resume, stop, or mark the project blocked
-
-This design keeps autonomy project-specific. The supervisor only runs projects that you list in
-`projects.json`.
-
-## Recommended Shape
-
-- Keep global Codex config reusable and neutral.
-- Put the long-term goal and autonomous protocol in repo-local `AGENTS.md`.
-- Launch projects one at a time with `launch_project.sh`.
-- If you want multiple projects simultaneously, launch each project separately.
-- Use separate worktrees or separate clones for simultaneous tasks on the same repo.
-- On macOS, launched supervisors automatically start a matching `caffeinate -is -w <pid>`
-  watcher so the machine stays awake while autonomous work is active.
-
-## Repository Contents
-
-- `samples/continuum-config.toml.sample`
-  Sample home-level Continuum config for user-specific paths such as the live runner root.
-- `samples/config.toml.sample`
-  Suggested `~/.codex/config.toml` with reusable autonomous profiles.
-- `samples/global-AGENTS.md.sample`
-  Neutral global guidance that does not force autonomous behavior into every repo.
-- `samples/repo-AGENTS.md.sample`
-  Repo-local autonomous template with project goal, status protocol, and milestone commit guidance.
-- `samples/hooks.json`
-  Optional interactive Stop hook sample.
-- `samples/auto_continue.py`
-  Optional interactive Stop hook helper.
-- `supervisor/codex_supervisor.py`
-  The unattended runner.
-- `supervisor/enable_project.py`
-  Add or update another repo in the runner without hand-editing all of the setup files.
-- `supervisor/launch_project.sh`
-  Launch one named project.
-- `supervisor/restart_project.sh`
-  Gracefully restart one named project.
-- `supervisor/stop_project.sh`
-  Stop one named project.
-- `supervisor/launch_all.sh`
-  Legacy “launch everything in the config” entry point.
-- `supervisor/projects.example.json`
-  Example runner config.
-- `supervisor/notify.py`
-  Optional Codex `notify` helper.
-- `scripts/install_home.py`
-  Install a home-level Continuum config and a `~/continuum-runner` alias that points at the live runner.
-- `MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md`
-  Step-by-step macOS guide for enabling one project.
-
-## Quick Start
-
-1. Copy `samples/config.toml.sample` to `~/.codex/config.toml`.
-2. Create a neutral `~/.codex/AGENTS.md` with shared safety defaults.
-3. Copy `supervisor/` somewhere permanent.
-4. Install a home-level Continuum config and runner alias:
+Install Codex CLI, log in once, and create a runner:
 
 ```bash
+git clone git@github.com:cthoey/continuum-codex.git
+cd continuum-codex
+
+brew install codex
+codex login
+
+mkdir -p ~/.codex ~/.codex/rules ~/continuum-runner
+cp samples/config.toml.sample ~/.codex/config.toml
+cp samples/global-AGENTS.md.sample ~/.codex/AGENTS.md
+
+cp supervisor/*.py supervisor/*.sh ~/continuum-runner/
+cp supervisor/projects.example.json ~/continuum-runner/projects.json
+chmod +x ~/continuum-runner/*.py ~/continuum-runner/*.sh
+
+cat >> ~/.codex/rules/default.rules <<'EOF'
+prefix_rule(pattern=["git", "add"], decision="allow")
+prefix_rule(pattern=["git", "commit"], decision="allow")
+prefix_rule(pattern=["git", "push"], decision="allow")
+EOF
+
 python3 scripts/install_home.py \
-  --runner-root /absolute/path/to/codex-runner \
-  --kit-root /absolute/path/to/continuum-codex
+  --runner-root ~/continuum-runner \
+  --kit-root "$PWD"
 ```
 
-5. Enable a repo with one command:
+Enable one repo:
 
 ```bash
-cd /path/to/codex-runner
+cd ~/continuum-runner
 ./enable_project.py /absolute/path/to/project \
+  --name my-project \
   --goal "The goal of this project is to ..."
 ```
 
-By default, the project name becomes the repo directory name. Use `--name <label>` if you want a
-different name in logs and SwiftBar.
-
-6. Launch a single project:
+Launch it:
 
 ```bash
-cd /path/to/codex-runner
+cd ~/continuum-runner
+./launch_project.sh my-project
+```
+
+That is enough to start one autonomous project. For the full from-scratch walkthrough, see [MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md](MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md).
+
+## Day-to-day commands
+
+Launch:
+
+```bash
+cd ~/continuum-runner
 ./launch_project.sh my-project
 ```
 
 Graceful restart:
 
 ```bash
-cd /path/to/codex-runner
-./restart_project.sh my-project ./projects.json
+cd ~/continuum-runner
+./restart_project.sh my-project
 ```
 
-Stop:
+Graceful stop:
 
 ```bash
-cd /path/to/codex-runner
+cd ~/continuum-runner
 ./stop_project.sh my-project
 ```
 
-That helper:
+Tail the project log:
 
-- adds or updates the project entry in `projects.json`
-- creates `docs/codex-progress.md` if it does not already exist
-- creates or updates a managed autonomous block inside the repo's `AGENTS.md`
-- auto-detects common review docs such as `README.md`, `docs/ROADMAP.md`, and `docs/EXECUTION_PLAN.md`
-- is the preferred way to opt more repos into autonomy after the base runner exists
-
-Use SwiftBar to manage projects that are already enabled.
-Use `enable_project.py` to provision new ones.
-
-Provisioning stays script-based on purpose because new autonomous projects need explicit inputs such
-as the repo path and the long-term project goal. That is safer and less error-prone than trying to
-collect those inputs from a menu bar action.
-
-The home-level config is the right place for machine-specific paths such as the live runner root.
-The repo-local `AGENTS.md` and `docs/codex-progress.md` stay in the project because they express
-that project's goal and working state.
-
-## Operational Notes
-
-- `workspace-write` keeps protected paths like `.git` read-only in the sandbox.
-  If you want unattended milestone commits and pushes, add Git rules such as:
-
-```python
-prefix_rule(pattern=["git", "add"], decision="allow")
-prefix_rule(pattern=["git", "commit"], decision="allow")
-prefix_rule(pattern=["git", "push"], decision="allow")
+```bash
+tail -f ~/continuum-runner/runtime/my-project/logs/codex.log
 ```
 
-- Temporary rate limits or transient overloads are retried automatically.
-- Hard quota or credits exhaustion is treated as a blocked state.
-- The quota handling is reactive, not predictive:
-  the kit does not know your remaining credits ahead of time; it only reacts when the Codex CLI
-  surfaces quota or rate-limit failures.
-- If quota exhaustion is reported clearly by the CLI, the project is marked blocked and stops.
-  If the CLI uses an unfamiliar error shape, it may land as a generic failure instead of a clean
-  quota-blocked state.
-- After you restore credits or limits, launch or restart the project again; the runner is designed
-  to continue the same thread chain when possible.
-- The optional Stop hook is for interactive use only. The supervisor path does not require it.
-- The kit is macOS-friendly, but the supervisor is plain Python and shell and can be adapted to
-  other Unix-like environments.
-- On macOS, project launches automatically start `caffeinate -is -w <supervisor-pid>`.
-  This is intentional and is part of the kit's behavior.
-- `caffeinate` keeps the machine awake while the supervisor runs, so it will stand in the way of
-  idle system sleep. It does not defeat lid-close sleep.
-- The display can still sleep because the kit uses `-is`, not display-wake flags.
-- Launches use `nohup`, so after starting a project you can close the launch terminal or quit
-  iTerm without killing the detached worker.
-- `restart_project.sh` sends `TERM`, waits for the active pass to finish and the supervisor to
-  exit, then launches the project again under the current runner configuration.
-- The restart path is request-based: it writes a lightweight `restart.<project>.json` marker while
-  a clean restart is pending, which makes it easy for external status UIs such as SwiftBar to show
-  "restart requested, waiting for current pass to finish."
-- The default graceful-restart wait is 7200 seconds (2 hours). Override it with
-  `CODEX_RESTART_WAIT_TIMEOUT_SECONDS` if a machine needs a different threshold.
-- `stop_project.sh` is the script-first way to request a clean stop; it does not force-kill the
-  active Codex pass.
-- `enable_project.py` is the script-first way to opt more repos into the runner after the global
-  Codex setup already exists. It is meant to remove the repetitive hand-editing of `projects.json`,
-  repo `AGENTS.md`, and `docs/codex-progress.md`.
+Inspect saved state:
+
+```bash
+cat ~/continuum-runner/runtime/my-project/state/status.json
+cat ~/continuum-runner/runtime/my-project/state/last_message.md
+```
+
+If you use SwiftBar, enable the project once with `enable_project.py` and then use the menu bar plugin to start, stop, and restart it.
+
+## Operational notes
+
+- Continuum is project-specific by design. Repos that are not in `projects.json` remain ordinary interactive Codex repos.
+- On macOS, project launches start `caffeinate -is -w <supervisor-pid>`. This is intentional and prevents idle system sleep while a worker is active.
+- Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time; it only reacts to surfaced Codex failures.
+- Temporary rate limits back off and retry. Surfaced hard quota exhaustion stops the worker and records the failure.
+- Launches use `nohup`, so you can close the launch terminal after the worker starts.
+- Milestone commits and pushes require Codex rules that allow `git add`, `git commit`, and `git push` outside the sandbox.
+- The supervisor path does not require the interactive Stop hook.
+
+## Repository layout
+
+- [supervisor/](supervisor/): runner scripts, project enabler, example config
+- [samples/](samples/): sample Codex config, AGENTS files, optional hook files
+- [scripts/install_home.py](scripts/install_home.py): writes `~/.config/continuum/config.toml` and a `~/continuum-runner` alias
+- [MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md](MACOS-SINGLE-PROJECT-AUTONOMOUS-SETUP.md): detailed setup guide
+- [RELEASE_NOTES_v0.1.0.md](RELEASE_NOTES_v0.1.0.md): first public release notes

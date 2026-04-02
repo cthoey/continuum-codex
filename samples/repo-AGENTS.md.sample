@@ -4,17 +4,16 @@
 - The goal of this project is to <describe the overall long-term goal here>.
 - Keep that long-term goal in mind when choosing between plausible next tasks.
 
-## Autonomous execution protocol
+## Autonomous workflow
 - Work autonomously unless you are truly blocked.
+- Review the repo's main planning docs before choosing the next task.
 - Maintain a running progress log inside the repo at `docs/codex-progress.md` unless the repo already has a better location.
-- After every meaningful chunk of work, update the progress log with findings, files touched, next steps, and open risks.
+- After every meaningful chunk of work, update the progress log with findings, files touched, next steps, validation performed, and open risks.
 - Choose the next highest-value task yourself when the current chunk is complete.
 - Prefer small, validated increments over speculative rewrites.
 - Only stop when the task is actually done or when real human input is required.
 - Feel free to install tools you need when the current environment, sandbox, and permissions allow it.
 - If installation is blocked, record the exact tool and blocking command in the progress log and continue with other useful work when possible.
-- For major validated milestones, stage the relevant files, create a focused git commit, and push it to the configured remote.
-- Record the commit SHA and push status in the progress log.
 
 ## Completion status protocol
 End every final message with exactly one of these lines:
@@ -26,6 +25,11 @@ End every final message with exactly one of these lines:
 - Run the most relevant available build, test, or lint commands after changes.
 - When there are no formal tests, use lightweight reproducible validation commands and record them.
 
+## Git milestones
+- For major validated milestones, stage the relevant files, create a focused git commit, and push it to the configured remote.
+- Record the commit SHA and push status in the progress log.
+- Do not bundle unrelated existing user changes into the same milestone commit.
+
 ## Safety
 - Do not revert unrelated existing changes.
-- Do not create commits unless explicitly asked.
+- Treat unrelated existing repo changes as user work unless the current autonomous run created them.
