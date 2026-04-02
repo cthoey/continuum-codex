@@ -81,7 +81,7 @@ Or use the service-managed path:
 ./continuum service start my-project
 ```
 
-That is enough to start one autonomous project. For the full from-scratch walkthrough, see [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md).
+That is enough to start one autonomous project. For the full from-scratch walkthroughs, see [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md) or [LINUX-SINGLE-PROJECT-SETUP.md](LINUX-SINGLE-PROJECT-SETUP.md).
 
 ## Day-to-day commands
 
@@ -226,4 +226,5 @@ These tests exercise the real `continuum` CLI against temporary repos and runner
 - [continuum](continuum): CLI entry point, starting with `continuum doctor`
 - [scripts/install_home.py](scripts/install_home.py): writes `~/.config/continuum/config.toml` and a `~/continuum-runner` alias
 - [MACOS-SINGLE-PROJECT-SETUP.md](MACOS-SINGLE-PROJECT-SETUP.md): detailed setup guide
+- [LINUX-SINGLE-PROJECT-SETUP.md](LINUX-SINGLE-PROJECT-SETUP.md): Linux single-project setup guide
 - [RELEASE_NOTES_v0.1.0.md](RELEASE_NOTES_v0.1.0.md): first public release notes
