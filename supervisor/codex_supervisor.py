@@ -37,6 +37,11 @@ from typing import Any, Callable, Iterable
 
 from continuum_notify import emit_notification
 
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:
+    tomllib = None
+
 STATUS_CONTINUE = "CONTINUE"
 STATUS_DONE = "DONE"
 STATUS_BLOCKED = "BLOCKED"
@@ -66,6 +71,9 @@ QUOTA_PATTERNS = [
     re.compile(r"maximum monthly spend", re.IGNORECASE),
     re.compile(r"ran out of credits", re.IGNORECASE),
     re.compile(r"credit balance", re.IGNORECASE),
+    re.compile(r"usage limit", re.IGNORECASE),
+    re.compile(r"purchase more credits", re.IGNORECASE),
+    re.compile(r"/codex/settings/usage", re.IGNORECASE),
 ]
 RATE_LIMIT_PATTERNS = [
     re.compile(r"rate limit", re.IGNORECASE),
@@ -77,6 +85,8 @@ RATE_LIMIT_PATTERNS = [
 ]
 DEFAULT_RATE_LIMIT_RETRY_SECONDS = 15 * 60
 DEFAULT_MAX_RATE_LIMIT_RETRIES = 8
+CODEX_HOME_DEFAULT = "~/.codex"
+CODEX_CONFIG_ENV = "CONTINUUM_CODEX_CONFIG"
 
 DEFAULT_FOLLOWUP_PROMPT = (
     "Proceed with the project. Continue from your last checkpoint. "
@@ -87,6 +97,9 @@ DEFAULT_FOLLOWUP_PROMPT = (
 
 PRINT_LOCK = threading.Lock()
 STOP_EVENT = threading.Event()
+CAFFEINATE_PROCESS: subprocess.Popen[str] | None = None
+CAFFEINATE_PIDFILE: Path | None = None
+CAFFEINATE_EXPECTED_PID: int | None = None
 
 
 @dataclass
@@ -96,6 +109,7 @@ class ProjectConfig:
     prompt: str
     profile: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     extra_args: list[str] = field(default_factory=list)
     followup_prompt: str | None = None
     max_passes: int = 0  # 0 => unlimited
@@ -145,6 +159,11 @@ def echo(msg: str) -> None:
         print(msg, flush=True)
 
 
+def slugify(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+    return slug or "project"
+
+
 def load_config(path: Path) -> RuntimeConfig:
     with path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -159,6 +178,7 @@ def load_config(path: Path) -> RuntimeConfig:
                 prompt=item["prompt"],
                 profile=item.get("profile"),
                 model=item.get("model"),
+                reasoning_effort=item.get("reasoning_effort"),
                 extra_args=list(item.get("extra_args", [])),
                 followup_prompt=item.get("followup_prompt"),
                 max_passes=int(item.get("max_passes", 0)),
@@ -208,6 +228,68 @@ def ensure_executable_exists(binary: str) -> None:
         raise SupervisorError(f"Could not find executable: {binary}")
 
 
+def load_codex_config() -> dict[str, Any]:
+    explicit = os.environ.get(CODEX_CONFIG_ENV)
+    if explicit:
+        path = Path(explicit).expanduser()
+    else:
+        codex_home = Path(os.environ.get("CODEX_HOME", CODEX_HOME_DEFAULT)).expanduser()
+        path = codex_home / "config.toml"
+
+    if not path.exists():
+        return {}
+
+    text = path.read_text(encoding="utf-8")
+    if tomllib is not None:
+        try:
+            loaded = tomllib.loads(text)
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def lookup_path(data: dict[str, Any], *parts: str) -> Any:
+    node: Any = data
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def normalize_text_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def resolve_effective_model_reasoning(
+    runtime: RuntimeConfig,
+    project: ProjectConfig,
+    codex_config: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    profile = project.profile or runtime.default_profile
+    profile_model = lookup_path(codex_config, "profiles", profile, "model") if profile else None
+    profile_reasoning = (
+        lookup_path(codex_config, "profiles", profile, "model_reasoning_effort") if profile else None
+    )
+
+    effective_model = (
+        normalize_text_value(project.model)
+        or normalize_text_value(profile_model)
+        or normalize_text_value(codex_config.get("model"))
+    )
+    effective_reasoning = (
+        normalize_text_value(project.reasoning_effort)
+        or normalize_text_value(profile_reasoning)
+        or normalize_text_value(codex_config.get("model_reasoning_effort"))
+    )
+    return effective_model, effective_reasoning
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -226,6 +308,86 @@ def write_text(path: Path, text: str) -> None:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     ensure_dir(path.parent)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _read_pidfile_pid(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except Exception:
+        return None
+    return pid if pid > 0 else None
+
+
+def _pid_is_running(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def ensure_supervisor_caffeinate(
+    control_root: Path,
+    selected_projects: list[str],
+    *,
+    startup_grace_seconds: float = 1.0,
+) -> None:
+    global CAFFEINATE_PROCESS
+    global CAFFEINATE_PIDFILE
+    global CAFFEINATE_EXPECTED_PID
+
+    if platform.system() != "Darwin" or shutil.which("caffeinate") is None:
+        return
+
+    pidfile: Path | None = None
+    if len(selected_projects) == 1:
+        pidfile = control_root / f"caffeinate.{slugify(selected_projects[0])}.pid"
+
+    if startup_grace_seconds > 0:
+        time.sleep(startup_grace_seconds)
+
+    if pidfile is not None and _pid_is_running(_read_pidfile_pid(pidfile)):
+        return
+
+    proc = subprocess.Popen(
+        ["caffeinate", "-is", "-w", str(os.getpid())],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    CAFFEINATE_PROCESS = proc
+    CAFFEINATE_EXPECTED_PID = proc.pid
+    if pidfile is not None:
+        ensure_dir(pidfile.parent)
+        pidfile.write_text(f"{proc.pid}\n", encoding="utf-8")
+        CAFFEINATE_PIDFILE = pidfile
+
+
+def cleanup_supervisor_caffeinate() -> None:
+    global CAFFEINATE_PROCESS
+    global CAFFEINATE_PIDFILE
+    global CAFFEINATE_EXPECTED_PID
+
+    if CAFFEINATE_PROCESS is not None and CAFFEINATE_PROCESS.poll() is None:
+        CAFFEINATE_PROCESS.terminate()
+        try:
+            CAFFEINATE_PROCESS.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            CAFFEINATE_PROCESS.kill()
+            CAFFEINATE_PROCESS.wait()
+
+    if CAFFEINATE_PIDFILE is not None and CAFFEINATE_EXPECTED_PID is not None:
+        if _read_pidfile_pid(CAFFEINATE_PIDFILE) == CAFFEINATE_EXPECTED_PID:
+            CAFFEINATE_PIDFILE.unlink(missing_ok=True)
+
+    CAFFEINATE_PROCESS = None
+    CAFFEINATE_PIDFILE = None
+    CAFFEINATE_EXPECTED_PID = None
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -280,6 +442,8 @@ def build_base_exec_args(runtime: RuntimeConfig, project: ProjectConfig) -> list
         args.extend(["-p", profile])
     if project.model:
         args.extend(["-m", project.model])
+    if project.reasoning_effort:
+        args.extend(["-c", f'model_reasoning_effort="{project.reasoning_effort}"'])
     if project.skip_git_repo_check:
         args.append("--skip-git-repo-check")
     args.extend(project.extra_args)
@@ -463,6 +627,14 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
     last_message_path = state_dir / "last_message.md"
     log_path = logs_dir / "codex.log"
     control_path = control_root / f"control.{name_slug}.json"
+    codex_config = load_codex_config()
+    effective_model, effective_reasoning_effort = resolve_effective_model_reasoning(runtime, project, codex_config)
+    state_settings = {
+        "configured_model": project.model,
+        "configured_reasoning_effort": project.reasoning_effort,
+        "effective_model": effective_model,
+        "effective_reasoning_effort": effective_reasoning_effort,
+    }
 
     pass_num = 0
     prior_state: dict[str, Any] = {}
@@ -491,6 +663,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                     active_codex_pid=None,
                     last_message_file=str(last_message_path),
                     log_file=str(log_path),
+                    **state_settings,
                 ),
             )
             return
@@ -543,6 +716,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                     active_codex_pid=pid,
                     last_message_file=str(last_message_path),
                     log_file=str(log_path),
+                    **state_settings,
                 ),
             )
 
@@ -565,6 +739,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                     inactivity_seconds=inactive_for,
                     last_message_file=str(last_message_path),
                     log_file=str(log_path),
+                    **state_settings,
                 ),
             )
             emit_runtime_notification(
@@ -598,6 +773,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                     inactivity_cleared_at=utcnow_iso(),
                     last_message_file=str(last_message_path),
                     log_file=str(log_path),
+                    **state_settings,
                 ),
             )
             emit_runtime_notification(
@@ -635,6 +811,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
                 active_codex_pid=pid,
                 last_message_file=str(last_message_path),
                 log_file=str(log_path),
+                **state_settings,
             )
             for key in (
                 "control_action",
@@ -678,6 +855,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             active_codex_pid=None,
             last_message_file=str(last_message_path),
             log_file=str(log_path),
+            **state_settings,
         )
 
         write_json(state_path, state_payload)
@@ -999,6 +1177,7 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
             active_codex_pid=None,
             last_message_file=str(last_message_path),
             log_file=str(log_path),
+            **state_settings,
         )
         write_json(state_path, stopped_state)
 
@@ -1037,34 +1216,39 @@ def main(argv: list[str]) -> int:
     control_root = config_path.parent
 
     install_signal_handlers()
+    selected_projects = [project.name for project in runtime.projects if project.enabled]
+    try:
+        ensure_supervisor_caffeinate(control_root, selected_projects)
 
-    threads: list[threading.Thread] = []
-    for project in runtime.projects:
-        if not project.enabled:
-            continue
-        project_path = Path(project.path).expanduser().resolve()
-        if not project_path.exists():
-            echo(f"[SKIP] {project.name}: path does not exist: {project_path}")
-            continue
-        project.path = str(project_path)
-        t = threading.Thread(
-            target=project_worker,
-            args=(runtime, project, root, control_root),
-            name=f"codex-{project.name}",
-            daemon=False,
-        )
-        threads.append(t)
-        t.start()
+        threads: list[threading.Thread] = []
+        for project in runtime.projects:
+            if not project.enabled:
+                continue
+            project_path = Path(project.path).expanduser().resolve()
+            if not project_path.exists():
+                echo(f"[SKIP] {project.name}: path does not exist: {project_path}")
+                continue
+            project.path = str(project_path)
+            t = threading.Thread(
+                target=project_worker,
+                args=(runtime, project, root, control_root),
+                name=f"codex-{project.name}",
+                daemon=False,
+            )
+            threads.append(t)
+            t.start()
 
-    if not threads:
-        echo("No enabled projects to run.")
-        return 1
+        if not threads:
+            echo("No enabled projects to run.")
+            return 1
 
-    for t in threads:
-        t.join()
+        for t in threads:
+            t.join()
 
-    echo("All project workers finished.")
-    return 0
+        echo("All project workers finished.")
+        return 0
+    finally:
+        cleanup_supervisor_caffeinate()
 
 
 if __name__ == "__main__":

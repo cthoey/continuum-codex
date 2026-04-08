@@ -24,6 +24,7 @@ FAIL = "FAIL"
 
 HOME_CONFIG_DEFAULT = "~/.config/continuum/config.toml"
 CODEX_HOME_DEFAULT = "~/.codex"
+CODEX_CONFIG_ENV = "CONTINUUM_CODEX_CONFIG"
 DEFAULT_HOME_RUNNER = "~/continuum-runner"
 DEFAULT_SERVICE_TIMEOUT_SECONDS = 2 * 60 * 60
 SERVICE_LABEL_PREFIX = "dev.continuum.codex"
@@ -304,6 +305,18 @@ def require_existing_path(path: Path, label: str) -> Path:
     return path
 
 
+def resolve_codex_config_path() -> Path:
+    explicit = os.environ.get(CODEX_CONFIG_ENV)
+    if explicit:
+        return Path(explicit).expanduser()
+
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+
+    return Path(CODEX_HOME_DEFAULT).expanduser() / "config.toml"
+
+
 def slugify_project_name(name: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
     return slug or "project"
@@ -336,6 +349,48 @@ def parse_dt(raw: str | None) -> datetime | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def read_codex_config() -> dict[str, Any]:
+    codex_config_path = resolve_codex_config_path()
+    if not codex_config_path.exists():
+        return {}
+    loaded = load_toml(codex_config_path)
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def normalize_text_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def resolve_effective_model_reasoning(
+    project_item: dict[str, Any],
+    runner_payload: dict[str, Any],
+    codex_config: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    profile = normalize_text_value(project_item.get("profile")) or normalize_text_value(
+        runner_payload.get("default_profile")
+    )
+    profile_model = lookup_path(codex_config, "profiles", profile, "model") if profile else None
+    profile_reasoning = (
+        lookup_path(codex_config, "profiles", profile, "model_reasoning_effort") if profile else None
+    )
+
+    effective_model = (
+        normalize_text_value(project_item.get("model"))
+        or normalize_text_value(profile_model)
+        or normalize_text_value(codex_config.get("model"))
+    )
+    effective_reasoning = (
+        normalize_text_value(project_item.get("reasoning_effort"))
+        or normalize_text_value(profile_reasoning)
+        or normalize_text_value(codex_config.get("model_reasoning_effort"))
+    )
+    return effective_model, effective_reasoning
 
 
 def humanize_age(raw: str | None) -> str | None:
@@ -384,6 +439,7 @@ def derive_overall_status(row: dict[str, Any]) -> str:
     state_kind = row.get("state_kind")
     supervisor_running = bool(row.get("supervisor_running"))
     row_live = row_looks_live(row)
+    active_state_kinds = {"running", "inactive", "rate_limited_wait"}
 
     restart_phase = row.get("restart_phase")
     if restart_phase:
@@ -394,8 +450,10 @@ def derive_overall_status(row: dict[str, Any]) -> str:
 
     control_action = row.get("control_action")
     control_phase = row.get("control_phase")
-    if control_action == "pause_after_pass" and control_phase:
+    if control_action == "pause_after_pass" and control_phase and state_kind in active_state_kinds:
         return f"pause:{control_phase}"
+    if control_action == "stop_after_pass" and state_kind in active_state_kinds:
+        return f"stop:{control_phase or 'requested'}"
 
     if state_kind == "running":
         return "running" if (supervisor_running or row_live) else "stale"
@@ -816,6 +874,10 @@ def run_enable(args: argparse.Namespace) -> int:
         cmd.extend(["--name", args.name])
     if args.profile:
         cmd.extend(["--profile", args.profile])
+    if args.model:
+        cmd.extend(["--model", args.model])
+    if args.reasoning_effort:
+        cmd.extend(["--reasoning-effort", args.reasoning_effort])
     if args.progress_path:
         cmd.extend(["--progress-path", args.progress_path])
     for review in args.review:
@@ -1078,6 +1140,7 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
         raise SystemExit(f"'projects' must be a list in {config_path}")
 
     runtime_root = resolve_runtime_root(config_path, payload)
+    codex_config = read_codex_config()
     rows: list[dict[str, Any]] = []
 
     for item in projects:
@@ -1117,19 +1180,33 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
         progress_at = None
         if progress_path.exists():
             progress_at = datetime.fromtimestamp(progress_path.stat().st_mtime, tz=timezone.utc).isoformat()
+        configured_model = normalize_text_value(item.get("model"))
+        configured_reasoning_effort = normalize_text_value(item.get("reasoning_effort"))
+        effective_model, effective_reasoning_effort = resolve_effective_model_reasoning(item, payload, codex_config)
+        if isinstance(state, dict):
+            effective_model = normalize_text_value(state.get("effective_model")) or effective_model
+            effective_reasoning_effort = (
+                normalize_text_value(state.get("effective_reasoning_effort")) or effective_reasoning_effort
+            )
 
         restart_phase = None
         restart_detail = None
         if isinstance(restart_state, dict):
             restart_phase = restart_state.get("phase")
             restart_detail = restart_state.get("detail")
-        control_action = None
-        control_phase = None
-        control_detail = None
+        control_action = state.get("control_action")
+        control_phase = state.get("control_phase")
+        control_detail = state.get("control_detail")
         if isinstance(control_state, dict):
-            control_action = control_state.get("action")
-            control_phase = control_state.get("phase")
-            control_detail = control_state.get("detail")
+            control_action = control_state.get("action", control_action)
+            control_phase = control_state.get("phase", control_phase)
+            control_detail = control_state.get("detail", control_detail)
+        if control_action in {"pause_after_pass", "stop_after_pass"} and not control_phase and state_kind in {
+            "running",
+            "inactive",
+            "rate_limited_wait",
+        }:
+            control_phase = "requested"
 
         active_codex_running = pid_is_alive(active_codex_pid if isinstance(active_codex_pid, int) else None)
         row = {
@@ -1137,6 +1214,10 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
             "enabled": bool(item.get("enabled", True)),
             "path": item.get("path"),
             "profile": item.get("profile") or payload.get("default_profile"),
+            "configured_model": configured_model,
+            "configured_reasoning_effort": configured_reasoning_effort,
+            "effective_model": effective_model,
+            "effective_reasoning_effort": effective_reasoning_effort,
             "overall_status": "",
             "state_kind": state_kind,
             "last_status": last_status,
@@ -1199,9 +1280,19 @@ def run_status(args: argparse.Namespace) -> int:
 
     for row in rows:
         print(f"{row['name']} [{row['overall_status']}]")
-        print(f"  Repo: {row['path']}")
+        print(f"  Project: {row['path']}")
         if row.get("profile"):
             print(f"  Profile: {row['profile']}")
+        if row.get("effective_model"):
+            configured = f" (override: {row['configured_model']})" if row.get("configured_model") else ""
+            print(f"  Model: {row['effective_model']}{configured}")
+        if row.get("effective_reasoning_effort"):
+            configured = (
+                f" (override: {row['configured_reasoning_effort']})"
+                if row.get("configured_reasoning_effort")
+                else ""
+            )
+            print(f"  Reasoning: {row['effective_reasoning_effort']}{configured}")
         if row.get("state_kind"):
             print(f"  State: {row['state_kind']}")
         if row.get("pass_num") is not None:
@@ -1492,6 +1583,12 @@ def build_parser() -> argparse.ArgumentParser:
     enable.add_argument("--goal", required=True, help="Long-term project goal.")
     enable.add_argument("--name", help="Project name for logs and status output.")
     enable.add_argument("--profile", default="autonomous", help="Runner profile name.")
+    enable.add_argument("--model", help="Optional explicit Codex model override for this project.")
+    enable.add_argument(
+        "--reasoning-effort",
+        dest="reasoning_effort",
+        help="Optional explicit Codex reasoning effort override for this project.",
+    )
     enable.add_argument("--review", action="append", default=[], metavar="PATH", help="Project-relative doc to review before choosing the next task. Repeatable.")
     enable.add_argument("--progress-path", default="docs/codex-progress.md", help="Project-relative progress log path.")
     enable.add_argument("--runner-root", help="Runner root to use.")

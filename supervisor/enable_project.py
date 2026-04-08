@@ -59,6 +59,15 @@ def parse_args() -> argparse.Namespace:
         help="Runner profile name. Defaults to 'autonomous'.",
     )
     parser.add_argument(
+        "--model",
+        help="Optional explicit Codex model override for this project.",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        dest="reasoning_effort",
+        help="Optional explicit Codex reasoning effort override for this project.",
+    )
+    parser.add_argument(
         "--runner-root",
         default=str(Path(__file__).resolve().parent),
         help="Runner directory that contains projects.json. Defaults to this script's directory.",
@@ -273,6 +282,10 @@ def upsert_project(config: dict, entry: dict) -> tuple[dict, str]:
             merged["path"] = project_path
             merged["prompt"] = entry["prompt"]
             merged["profile"] = entry["profile"]
+            if "model" in entry:
+                merged["model"] = entry["model"]
+            if "reasoning_effort" in entry:
+                merged["reasoning_effort"] = entry["reasoning_effort"]
             merged.setdefault("max_passes", 0)
             merged.setdefault("resume_existing", True)
             merged.setdefault("enabled", True)
@@ -316,6 +329,10 @@ def main() -> int:
         "enabled": True,
         "extra_args": [],
     }
+    if args.model:
+        entry["model"] = args.model
+    if args.reasoning_effort:
+        entry["reasoning_effort"] = args.reasoning_effort
     config, action = upsert_project(config, entry)
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 

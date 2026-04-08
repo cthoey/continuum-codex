@@ -22,6 +22,7 @@ codex_hooks = true
 # A dedicated unattended profile. Use this profile from the supervisor.
 [profiles.autonomous]
 model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
 approval_policy = "never"
 sandbox_mode = "workspace-write"
 
@@ -32,6 +33,7 @@ network_access = false
 # A lighter/faster profile for cheaper background sub-tasks.
 [profiles.autonomous_fast]
 model = "gpt-5.4-mini"
+model_reasoning_effort = "medium"
 approval_policy = "never"
 sandbox_mode = "workspace-write"
 

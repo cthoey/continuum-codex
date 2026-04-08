@@ -58,6 +58,41 @@ cleanup_control() {
   rm -f "$CONTROL_STATEFILE"
 }
 
+write_stop_requested() {
+  python3 - "$CONTROL_STATEFILE" "$PROJECT_NAME" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+project_name = sys.argv[2]
+now = datetime.now(timezone.utc).isoformat()
+
+payload = {}
+if state_path.exists():
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+
+payload.update(
+    {
+        "project": project_name,
+        "action": "stop_after_pass",
+        "phase": "requested",
+        "detail": "Stop requested; finish the current pass and then stop.",
+        "updated_at": now,
+        "requested_at": payload.get("requested_at", now),
+    }
+)
+
+state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+PY
+}
+
 signal_service_term() {
   local signaled="false"
   if [[ -f "$LAUNCHD_SERVICE" ]] && command -v launchctl >/dev/null 2>&1; then
@@ -73,9 +108,8 @@ signal_service_term() {
 
 if [[ ! -f "$PIDFILE" ]]; then
   if signal_service_term; then
-    cleanup_caffeinate
+    write_stop_requested
     cleanup_restart
-    cleanup_control
     echo "Requested clean stop for service-managed project '$PROJECT_NAME'"
     exit 0
   fi
@@ -89,9 +123,8 @@ fi
 PID="$(cat "$PIDFILE" 2>/dev/null || true)"
 if [[ -z "$PID" ]]; then
   if signal_service_term; then
-    cleanup_caffeinate
+    write_stop_requested
     cleanup_restart
-    cleanup_control
     rm -f "$PIDFILE"
     echo "Requested clean stop for service-managed project '$PROJECT_NAME'"
     exit 0
@@ -105,11 +138,10 @@ if [[ -z "$PID" ]]; then
 fi
 
 if kill -0 "$PID" 2>/dev/null; then
+  write_stop_requested
   signal_service_term >/dev/null 2>&1 || true
   kill "$PID"
-  cleanup_caffeinate
   cleanup_restart
-  cleanup_control
   echo "Sent TERM to project supervisor '$PROJECT_NAME' (PID $PID)"
   exit 0
 fi

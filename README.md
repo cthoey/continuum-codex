@@ -23,6 +23,7 @@ The name refers to continuity across many Codex passes. See [CHANGELOG.md](CHANG
 - can expose project status and controls through [SwiftBar](https://github.com/cthoey/swiftbar-plugins)
 - can emit local alerts, append a runner event log, call an external notification command, or POST a webhook payload
 - can make milestone commits and pushes if your Codex rules allow Git commands
+- can explicitly configure and show the effective model and reasoning effort for each project
 
 ## How it works
 
@@ -35,6 +36,17 @@ The name refers to continuity across many Codex passes. See [CHANGELOG.md](CHANG
 Only projects you explicitly enable become autonomous.
 
 The stable home-level control path is `~/.config/continuum/config.toml` plus `~/continuum-runner`.
+
+## Technical details
+
+Continuum is a wrapper around documented Codex CLI features. It does not replace Codex's own
+instruction system, session model, or sandboxing model.
+
+- Continuum starts the first pass with [`codex exec`](https://developers.openai.com/codex/noninteractive) and continues the same Codex session with `codex exec resume --last`. That is the core continuation loop.
+- Continuum stores project-specific operating instructions in project-root `AGENTS.md`. Codex reads `AGENTS.md` files before it starts work and layers global guidance with project-specific guidance according to its own instruction discovery rules. See the official [`AGENTS.md` guide](https://developers.openai.com/codex/guides/agents-md).
+- Continuum expects reusable Codex defaults, such as model choice, reasoning effort, profiles, approval policy, and sandbox mode, to live in `~/.codex/config.toml`. A project can also override `model` and `reasoning_effort` explicitly in `projects.json` or through `continuum enable --model ... --reasoning-effort ...`. For Codex's own configuration precedence and trusted-project behavior, see [Config basics](https://developers.openai.com/codex/config-basic).
+- Continuum does not require a Codex `Stop` hook. The continuation loop is managed externally by the runner, not by the interactive Codex hook system. If you already use Codex hooks for validation or prompting behavior, Continuum can coexist with them, but the autonomous runner does not depend on them. See the official [Hooks documentation](https://developers.openai.com/codex/hooks).
+- Continuum keeps its own runner state in `~/continuum-runner/` or the configured runner root. That state includes `projects.json`, per-project logs, per-project `status.json`, restart markers, and the runner event log. Codex still keeps its own session/thread history separately.
 
 ## Quick start
 
@@ -67,8 +79,12 @@ Enable one project:
 ```bash
 ./continuum enable /absolute/path/to/project \
   --name my-project \
-  --goal "The goal of this project is to ..."
+  --goal "The goal of this project is to ..." \
+  --model gpt-5.4 \
+  --reasoning-effort xhigh
 ```
+
+If you omit `--model` or `--reasoning-effort`, Continuum resolves them from the selected Codex profile and your `~/.codex/config.toml`.
 
 Launch it:
 
@@ -173,6 +189,8 @@ Inspect runner state:
 ./continuum status my-project
 ```
 
+`continuum status` shows the effective profile, model, and reasoning effort for each project.
+
 Tail the project log:
 
 ```bash
@@ -209,6 +227,7 @@ These tests exercise the real `continuum` CLI against temporary projects and run
 - Continuum is project-specific by design. Projects that are not in `projects.json` remain ordinary interactive Codex projects.
 - The stable install target is the home-level pair `~/.config/continuum/config.toml` and `~/continuum-runner`. Other paths should be treated as implementation detail or development setup.
 - The runner is plain Python and shell, so the core flow is not macOS-only.
+- Continuum does not require the interactive Codex `Stop` hook. The supervisor path manages continuation itself.
 - On macOS, both detached launches and service mode keep the machine awake while a worker is active. The detached path uses `caffeinate -is -w <supervisor-pid>`, and service mode does the same inside `service_runner.py`.
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time; it only reacts to surfaced Codex failures.
 - Temporary rate limits back off and retry. Surfaced hard quota exhaustion stops the worker and records the failure.
@@ -223,7 +242,6 @@ These tests exercise the real `continuum` CLI against temporary projects and run
 - Notification delivery is configured in `projects.json`: `notify`, `notification_command`, `notification_webhook_url`, `notification_webhook_timeout_seconds`, and `inactivity_notify_after_seconds`.
 - `notification_command` receives one extra argument containing the JSON event payload. `notification_webhook_url` gets the same payload as a simple HTTP POST.
 - Milestone commits and pushes require Codex rules that allow `git add`, `git commit`, and `git push` outside the sandbox.
-- The supervisor path does not require the interactive Stop hook.
 
 ## Project layout
 

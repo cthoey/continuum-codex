@@ -96,6 +96,10 @@ Important defaults in the sample config:
 
 That means unattended runs do not pause for approval. If a tool install or network action is blocked by the current environment, the project should record the blocker and continue with other useful work when possible.
 
+Continuum does not require a Codex `Stop` hook for its continuation loop. The runner manages
+continuation itself through `codex exec` and `codex exec resume --last`. Codex hooks are optional
+and can still be used separately if you already rely on them for validation or prompt shaping.
+
 ## 4. Create the runner
 
 Use the CLI to create or refresh the runner and install the home-level config:
@@ -124,8 +128,12 @@ Use the CLI instead of hand-editing `projects.json`, project `AGENTS.md`, and `d
 ```bash
 "$KIT_ROOT/continuum" enable "$PROJECT_PATH" \
   --name "$PROJECT_NAME" \
-  --goal "The goal of this project is to ..."
+  --goal "The goal of this project is to ..." \
+  --model gpt-5.4 \
+  --reasoning-effort xhigh
 ```
+
+Both flags are optional. If you omit them, Continuum uses the model and reasoning defaults from the selected Codex profile in `~/.codex/config.toml`.
 
 What the helper writes:
 
@@ -163,6 +171,8 @@ Inspect saved state:
 ```bash
 "$KIT_ROOT/continuum" status "$PROJECT_NAME"
 ```
+
+That status view includes the effective profile, model, and reasoning effort for the project.
 
 Inspect the `launchctl` service definition and runtime state:
 

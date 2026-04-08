@@ -16,6 +16,8 @@
       "path": "/absolute/path/to/project",
       "prompt": "Work autonomously on this project. The overall project goal is to <repeat the long-term project goal here>. Follow the repo AGENTS.md instructions, keep progress notes updated, choose the next highest-value task yourself, install useful tools when the current environment allows it, create git commits and pushes for major validated milestones, and continue until you are DONE or truly BLOCKED.",
       "profile": "autonomous",
+      "model": "gpt-5.4",
+      "reasoning_effort": "xhigh",
       "max_passes": 0,
       "resume_existing": true,
       "enabled": true,
