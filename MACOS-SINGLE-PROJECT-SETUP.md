@@ -191,7 +191,9 @@ What to expect:
 - the first pass uses `codex exec`
 - follow-up passes use `codex exec resume --last`
 - `STATUS: CONTINUE` means keep looping
-- `STATUS: DONE` or `STATUS: BLOCKED: ...` means stop
+- `STATUS: DONE` means stop because the project reported that it reached its goal
+- `STATUS: BLOCKED: human review needed: ...` means stop and hand the project back to you
+- other `STATUS: BLOCKED: ...` reasons mean stop for another real blocker
 
 If you prefer [SwiftBar](https://github.com/cthoey/swiftbar-plugins), this is the point where it becomes useful. Project provisioning stays script-based, but day-to-day start, stop, restart, log inspection, and state-file access can happen from the menu bar once the project is enabled.
 
@@ -256,7 +258,7 @@ Detached-mode emergency restart:
 - Credits and quota handling are reactive, not predictive. Continuum does not know your remaining credits ahead of time.
 - Temporary rate limits back off and retry.
 - Surfaced hard quota exhaustion stops the worker and records the failure.
-- `continuum status` now distinguishes useful runtime states such as `running`, `paused`, `force-stopped`, `waiting`, `blocked`, `failed`, and `done`.
+- `continuum status` now distinguishes useful runtime states such as `running`, `paused`, `force-stopped`, `review-needed`, `waiting`, `blocked`, `failed`, and `done`.
 - Long-running passes with no fresh `codex.log` activity for `inactivity_notify_after_seconds` move into an `inactive` state and emit one notification event.
 - The runner appends all notification events to `~/continuum-runner/continuum-notify.log` even if desktop notifications are disabled.
 - If you want external delivery, add `notification_command` or `notification_webhook_url` in `~/continuum-runner/projects.json`.

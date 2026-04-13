@@ -14,7 +14,7 @@ The name refers to continuity across many Codex passes. See [CHANGELOG.md](CHANG
 - writes project-specific goals and status rules into project-local `AGENTS.md`
 - keeps a durable project-local progress log in `docs/codex-progress.md`
 - provides per-project start, pause, stop, stop-now, and restart controls
-- supports explicit `paused`, `stopped`, `force-stopped`, `rate-limited`, `blocked`, `failed`, and `done` runtime states
+- supports explicit `paused`, `stopped`, `force-stopped`, `review-needed`, `rate-limited`, `blocked`, `failed`, and `done` runtime states
 - records per-project logs and runtime state
 - retries temporary rate limits and stops on surfaced hard quota exhaustion
 - can be used in macOS and Linux environments
@@ -31,7 +31,7 @@ The name refers to continuity across many Codex passes. See [CHANGELOG.md](CHANG
 2. Run `continuum init` to create or refresh the runner and home config.
 3. Run `continuum enable` with a project path and a long-term project goal.
 4. Launch that project with `continuum start <name>` or `continuum service start <name>`.
-5. Continuum keeps the project going in the same Codex thread until the model reports that it has achieved its goal, or ran into a blocker.
+5. Continuum keeps the project going in the same Codex thread until the project reports that it has achieved its goal, ran into a blocker, or needs to hand the work back for human review.
 
 Only projects you explicitly enable become autonomous.
 
@@ -44,6 +44,7 @@ instruction system, session model, or sandboxing model.
 
 - Continuum starts the first pass with [`codex exec`](https://developers.openai.com/codex/noninteractive) and continues the same Codex session with `codex exec resume --last`. That is the core continuation loop.
 - Continuum stores project-specific operating instructions in project-root `AGENTS.md`. Codex reads `AGENTS.md` files before it starts work and layers global guidance with project-specific guidance according to its own instruction discovery rules. See the official [`AGENTS.md` guide](https://developers.openai.com/codex/guides/agents-md).
+- Continuum keeps the status protocol project-local. Projects should use `STATUS: BLOCKED: human review needed: <reason>` when the next step depends on human judgment, playtesting, runtime observation, or choosing between multiple plausible behaviors. Continuum surfaces that as `review-needed` instead of a generic blocked state.
 - Continuum expects reusable Codex defaults, such as model choice, reasoning effort, profiles, approval policy, and sandbox mode, to live in `~/.codex/config.toml`. A project can also override `model` and `reasoning_effort` explicitly in `projects.json` or through `continuum enable --model ... --reasoning-effort ...`. For Codex's own configuration precedence and trusted-project behavior, see [Config basics](https://developers.openai.com/codex/config-basic).
 - Continuum does not require a Codex `Stop` hook. The continuation loop is managed externally by the runner, not by the interactive Codex hook system. If you already use Codex hooks for validation or prompting behavior, Continuum can coexist with them, but the autonomous runner does not depend on them. See the official [Hooks documentation](https://developers.openai.com/codex/hooks).
 - Continuum keeps its own runner state in `~/continuum-runner/` or the configured runner root. That state includes `projects.json`, per-project logs, per-project `status.json`, restart markers, and the runner event log. Codex still keeps its own session/thread history separately.

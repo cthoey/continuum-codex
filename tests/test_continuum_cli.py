@@ -201,7 +201,8 @@ class ContinuumCliIntegrationTests(unittest.TestCase):
 
         payload = load_json(self.config)
         self.assertEqual(payload["projects"][0]["name"], self.project_name)
-        self.assertTrue((self.repo / "AGENTS.md").exists())
+        agents_text = (self.repo / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("STATUS: BLOCKED: human review needed:", agents_text)
         self.assertTrue((self.repo / "docs" / "codex-progress.md").exists())
 
         self.continuum(
@@ -431,6 +432,35 @@ class ContinuumCliIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: self.notify_log.exists(), timeout=10.0)
         contents = self.notify_log.read_text(encoding="utf-8")
         self.assertIn('"event_type": "inactivity"', contents)
+
+    def test_human_review_needed_is_a_distinct_runtime_state(self) -> None:
+        self.init_runner()
+        self.write_fake_codex(
+            textwrap.dedent(
+                """
+                printf 'investigated\\nSTATUS: BLOCKED: human review needed: gameplay feel needs live verification\\n'
+                """
+            ).strip()
+            + "\n"
+        )
+        self.write_single_project_config()
+
+        self.continuum(
+            "start",
+            self.project_name,
+            "--runner-root",
+            str(self.runner),
+            "--home-config",
+            str(self.home_config),
+            "--config",
+            str(self.config),
+        )
+
+        self.wait_for(lambda: self.status_json().get("overall_status") == "review-needed", timeout=10.0)
+        status = self.status_json()
+        self.assertEqual(status.get("state_kind"), "review_needed")
+        self.assertEqual(status.get("last_status"), "BLOCKED")
+        self.assertEqual(status.get("blocked_reason_kind"), "human_review_needed")
 
     def test_status_prefers_running_when_restart_timed_out_but_worker_is_live(self) -> None:
         self.init_runner()

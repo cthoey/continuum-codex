@@ -53,6 +53,7 @@ STATUS_RATE_LIMIT_WAIT = "RATE_LIMIT_WAIT"
 STATE_RUNNING = "running"
 STATE_INACTIVE = "inactive"
 STATE_RATE_LIMIT_WAIT = "rate_limited_wait"
+STATE_REVIEW_NEEDED = "review_needed"
 STATE_PAUSED = "paused"
 STATE_STOPPED = "stopped"
 STATE_FORCE_STOPPED = "force_stopped"
@@ -62,8 +63,18 @@ STATE_FAILED = "failed"
 STATE_MAX_PASSES = "max_passes"
 
 CONTROL_ACTION_PAUSE = "pause_after_pass"
+BLOCKED_REASON_HUMAN_REVIEW = "human_review_needed"
 
 STATUS_RE = re.compile(r"^STATUS:\s*(CONTINUE|DONE|BLOCKED)(?::\s*(.*))?\s*$", re.MULTILINE)
+HUMAN_REVIEW_PATTERNS = [
+    re.compile(r"^\s*human review needed\b", re.IGNORECASE),
+    re.compile(r"\bhuman-guid(?:ed|ance)\b", re.IGNORECASE),
+    re.compile(r"\bhuman judgment\b", re.IGNORECASE),
+    re.compile(r"\bplaytest(?:ing)? needed\b", re.IGNORECASE),
+    re.compile(r"\bruntime observation needed\b", re.IGNORECASE),
+    re.compile(r"\bsubjective correctness\b", re.IGNORECASE),
+    re.compile(r"\bmultiple plausible behaviors\b", re.IGNORECASE),
+]
 QUOTA_PATTERNS = [
     re.compile(r"insufficient_quota", re.IGNORECASE),
     re.compile(r"exceeded your current quota", re.IGNORECASE),
@@ -92,6 +103,9 @@ DEFAULT_FOLLOWUP_PROMPT = (
     "Proceed with the project. Continue from your last checkpoint. "
     "Update the progress notes. Choose the next highest-value task yourself. "
     "Only stop when you are actually DONE or BLOCKED. "
+    "If the next step requires human playtesting, runtime observation, subjective correctness judgment, "
+    "or choosing between multiple plausible behaviors, end with "
+    "STATUS: BLOCKED: human review needed: <reason>. "
     "End with exactly one status line: STATUS: CONTINUE, STATUS: DONE, or STATUS: BLOCKED: <reason>."
 )
 
@@ -408,6 +422,16 @@ def parse_status(message: str) -> ParsedStatus:
     kind = last.group(1)
     detail = (last.group(2) or "").strip()
     return ParsedStatus(kind, detail)
+
+
+def classify_blocked_reason(detail: str) -> str | None:
+    normalized = " ".join(detail.strip().split())
+    if not normalized:
+        return None
+    for pattern in HUMAN_REVIEW_PATTERNS:
+        if pattern.search(normalized):
+            return BLOCKED_REASON_HUMAN_REVIEW
+    return None
 
 
 def build_state_payload(
@@ -1079,6 +1103,29 @@ def project_worker(runtime: RuntimeConfig, project: ProjectConfig, root: Path, c
 
         if parsed.kind == STATUS_BLOCKED:
             msg = parsed.detail or "Blocked"
+            blocked_reason_kind = classify_blocked_reason(msg)
+            if blocked_reason_kind == BLOCKED_REASON_HUMAN_REVIEW:
+                state_payload.update(
+                    {
+                        "state_kind": STATE_REVIEW_NEEDED,
+                        "blocked_reason_kind": blocked_reason_kind,
+                    }
+                )
+                write_json(state_path, state_payload)
+                echo(f"[{project.name}] REVIEW NEEDED: {msg}")
+                emit_runtime_notification(
+                    runtime,
+                    control_root,
+                    event_type="review_needed",
+                    project=project,
+                    title=f"Continuum review needed: {project.name}",
+                    message=msg[:240],
+                    severity="warn",
+                    phase=phase,
+                    pass_num=pass_num,
+                )
+                return
+
             state_payload.update({"state_kind": STATE_BLOCKED})
             write_json(state_path, state_payload)
             echo(f"[{project.name}] BLOCKED: {msg}")

@@ -18,6 +18,9 @@ DEFAULT_CONFIG = {
         "Proceed with the project. Continue from your last checkpoint. "
         "Update the progress notes. Choose the next highest-value task yourself. "
         "Only stop when you are actually DONE or BLOCKED. "
+        "If the next step requires human playtesting, runtime observation, subjective correctness judgment, "
+        "or choosing between multiple plausible behaviors, end with "
+        "STATUS: BLOCKED: human review needed: <reason>. "
         "End with exactly one status line: STATUS: CONTINUE, STATUS: DONE, or "
         "STATUS: BLOCKED: <reason>."
     ),
@@ -175,6 +178,7 @@ def render_prompt(goal: str, review_docs: list[str], progress_path: str) -> str:
             "Install useful tools when the current environment allows it.",
             "Create git commits and pushes for major validated milestones.",
             "Choose the next highest-value task yourself.",
+            "If the next step requires human playtesting, runtime observation, subjective correctness judgment, or choosing between multiple plausible behaviors, report STATUS: BLOCKED: human review needed: <reason>.",
             "Continue until you are DONE or truly BLOCKED.",
         ]
     )
@@ -200,6 +204,7 @@ def render_managed_agents_block(goal: str, review_docs: list[str], progress_path
             "- Choose the next highest-value task yourself when the current chunk is complete.",
             "- Prefer small, validated increments over speculative rewrites.",
             "- Only stop when the task is actually done or when real human input is required.",
+            "- If the next step requires human playtesting, runtime observation, subjective correctness judgment, or choosing between multiple plausible behaviors, stop and report `STATUS: BLOCKED: human review needed: <specific reason>`.",
             "- Feel free to install tools you need when the current environment, sandbox, and permissions allow it.",
             f"- If installation is blocked, record the exact tool and blocking command in `{progress_path}` and continue with other useful work when possible.",
             "- For major validated milestones, stage the relevant files, create a focused git commit, and push it to the configured remote.",
@@ -217,7 +222,9 @@ def render_managed_agents_block(goal: str, review_docs: list[str], progress_path
             "",
             "Use `STATUS: DONE` only when the requested objective is genuinely complete.",
             "",
-            "Use `STATUS: BLOCKED: ...` only when real human input, credentials, missing files, or permissions are required.",
+            "Use `STATUS: BLOCKED: human review needed: <specific reason>` when the next step depends on human judgment, playtesting, runtime observation, or choosing between multiple plausible behaviors.",
+            "",
+            "Use other `STATUS: BLOCKED: ...` reasons for real blockers such as credentials, missing files, permissions, or other required human input.",
             MANAGED_END,
         ]
     )

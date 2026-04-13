@@ -232,6 +232,10 @@ def file_contains_status_protocol(text: str) -> bool:
     return all(item in text for item in required)
 
 
+def file_contains_human_review_handoff(text: str) -> bool:
+    return "human review needed" in text.lower()
+
+
 def file_contains_managed_block(text: str) -> bool:
     return any(begin in text and end in text for begin, end in MANAGED_MARKERS)
 
@@ -437,6 +441,7 @@ def row_looks_live(row: dict[str, Any]) -> bool:
 
 def derive_overall_status(row: dict[str, Any]) -> str:
     state_kind = row.get("state_kind")
+    blocked_reason_kind = row.get("blocked_reason_kind")
     supervisor_running = bool(row.get("supervisor_running"))
     row_live = row_looks_live(row)
     active_state_kinds = {"running", "inactive", "rate_limited_wait"}
@@ -469,7 +474,11 @@ def derive_overall_status(row: dict[str, Any]) -> str:
         return "force-stopped"
     if state_kind == "done":
         return "done"
+    if state_kind == "review_needed":
+        return "review-needed"
     if state_kind == "blocked":
+        if blocked_reason_kind == "human_review_needed":
+            return "review-needed"
         return "blocked"
     if state_kind == "failed":
         return "failed"
@@ -482,6 +491,8 @@ def derive_overall_status(row: dict[str, Any]) -> str:
     if last_status == "DONE":
         return "done"
     if last_status == "BLOCKED":
+        if blocked_reason_kind == "human_review_needed":
+            return "review-needed"
         return "blocked"
     if last_status == "FAILED":
         return "failed"
@@ -1197,6 +1208,7 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
         control_action = state.get("control_action")
         control_phase = state.get("control_phase")
         control_detail = state.get("control_detail")
+        blocked_reason_kind = state.get("blocked_reason_kind")
         if isinstance(control_state, dict):
             control_action = control_state.get("action", control_action)
             control_phase = control_state.get("phase", control_phase)
@@ -1248,6 +1260,7 @@ def collect_status_rows(config_path: Path) -> list[dict[str, Any]]:
             "control_action": control_action,
             "control_phase": control_phase,
             "control_detail": control_detail,
+            "blocked_reason_kind": blocked_reason_kind,
         }
         row["overall_status"] = derive_overall_status(row)
         rows.append(row)
@@ -1295,6 +1308,8 @@ def run_status(args: argparse.Namespace) -> int:
             print(f"  Reasoning: {row['effective_reasoning_effort']}{configured}")
         if row.get("state_kind"):
             print(f"  State: {row['state_kind']}")
+        if row.get("blocked_reason_kind") == "human_review_needed":
+            print("  Handoff: human review needed")
         if row.get("pass_num") is not None:
             phase = f" ({row['phase']})" if row.get("phase") else ""
             print(f"  Pass: {row['pass_num']}{phase}")
@@ -1526,6 +1541,10 @@ def run_doctor(args: argparse.Namespace) -> int:
                             add_result(results, PASS, f"project:{name}:agents", f"{name}: AGENTS.md contains a managed autonomous block and the STATUS protocol.")
                         else:
                             add_result(results, PASS, f"project:{name}:agents", f"{name}: AGENTS.md contains the STATUS protocol.")
+                        if file_contains_human_review_handoff(text):
+                            add_result(results, PASS, f"project:{name}:handoff", f"{name}: AGENTS.md includes explicit human-review handoff guidance.")
+                        else:
+                            add_result(results, WARN, f"project:{name}:handoff", f"{name}: AGENTS.md is missing explicit `human review needed` handoff guidance.")
                     else:
                         add_result(results, FAIL, f"project:{name}:agents", f"{name}: AGENTS.md exists but does not contain the required STATUS protocol.")
                 else:
