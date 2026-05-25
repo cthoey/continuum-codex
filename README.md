@@ -1,5 +1,7 @@
 # Continuum for Codex
 
+> Obsolete: Codex now has native Goal mode. Continuum's original "Proceed forever" loop has been superseded by Goal mode; use `/goal` first for long-running single-project Codex work. Continuum is archived/maintenance-only and remains relevant only as a local ops wrapper for service management, status files, notifications, and project scaffolding when native Goal mode is not enough.
+
 Continuum is an open-source control layer for long-running Codex CLI projects.
 
 Use it when you find yourself repeatedly nudging the same Codex project forward with the same prompt, for example `Proceed`. Do not use it when the work still needs frequent human decisions, prompt reframing, or review after every small step.
